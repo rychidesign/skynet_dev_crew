@@ -1,0 +1,9 @@
+crewai>=0.80.0
+crewai-tools>=0.14.0
+anthropic>=0.40.0
+google-generativeai>=0.8.0
+python-telegram-bot>=20.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+litellm>=1.0.0

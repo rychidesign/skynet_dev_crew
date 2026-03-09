@@ -1,27 +1,24 @@
 import os
-from crewai import Agent, LLM
+from crewai import Agent
+from models import get_llm
 from tools.ask_human import AskHuman
 from tools.file_reader import create_file_reader
 from tools.file_writer import create_file_writer
 
 
 def create_junior_agent(project_path: str):
-    """Create the Junior developer agent."""
-
-    llm = LLM(model="gemini/gemini-2.5-flash", api_key=os.getenv("GOOGLE_API_KEY"))
+    """Junior developer — model per models.AGENT_MODELS['junior']."""
+    llm = get_llm("junior")
 
     return Agent(
         role="Junior vývojář",
-        goal="Dokončit testy, dokumentaci a drobné úpravy kódu",
-        backstory=f"""
-        Jsi mladý, nadšený vývojář, který se snaží učit a zlepšovat.
-        Pečlivě píšeš testy a dokumentaci.
-        Jsi zodpovědný za kvalitu a detaily.
-        
-        Pracuješ na projektu v adresáři: {project_path}
-        Pokud si nejsi jistý něčím, neboj se zeptat zkušenějšího kolegy (kodéra)
-        nebo člověka.
-        """,
+        goal="Complete tests, documentation, and minor code adjustments",
+        backstory=f"""You are a young, enthusiastic developer eager to learn and improve.
+You carefully write tests and documentation. You are responsible for quality and details.
+
+You are working on a project in: {project_path}
+If unsure about anything, don't hesitate to ask a more experienced colleague
+or the human.""",
         verbose=True,
         allow_delegation=False,
         llm=llm,

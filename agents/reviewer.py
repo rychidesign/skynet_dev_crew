@@ -1,5 +1,6 @@
 import os
-from crewai import Agent, LLM
+from crewai import Agent
+from models import get_llm
 from tools.file_reader import create_file_reader
 from tools.list_dir import create_list_dir
 from tools.find_files import create_find_files
@@ -8,56 +9,48 @@ from tools.lint_check import create_lint_check
 
 
 def create_reviewer_agent(project_path: str):
-    """Reviewer (QA) — Claude Haiku 4.5.
-
-    Reviews Coder's output for bugs, security holes (especially Supabase RLS
-    and auth), performance issues, and convention violations. Returns feedback
-    to Coder if problems are found.
-    """
-    llm = LLM(
-        model="anthropic/claude-haiku-4-5",
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        max_tokens=4096,
-    )
+    """Reviewer (QA) — model per models.AGENT_MODELS['reviewer']."""
+    llm = get_llm("reviewer")
 
     return Agent(
         role="Reviewer",
         goal=(
-            "Zkontrolovat kód od Kodéra — hledat bugy, bezpečnostní díry "
-            "(Supabase RLS policies, auth, XSS, injection), performance problémy "
-            "a porušení coding conventions. Vrátit jasný strukturovaný review."
+            "Review code from the Coder — look for bugs, security holes, "
+            "performance problems, and coding convention violations. "
+            "Return a clear, structured review."
         ),
-        backstory=f"""Jsi security-focused code reviewer s expertízou na:
-- Supabase RLS policies a Row Level Security
-- React best practices a performance (memo, lazy loading, re-renders)
-- TypeScript strict typing a type safety
-- OWASP bezpečnostní standardy
-- Accessibility (WCAG)
+        backstory=f"""You are a thorough code reviewer focused on:
+- Security — authentication, authorization, injection, XSS, path traversal
+- Functionality — complete implementation, correct imports, logic errors
+- Performance — unnecessary complexity, inefficient operations
+- Conventions — compliance with coding standards defined in rules/
 
-Kontroluješ kód systematicky:
-1. Bezpečnost — RLS policies pokrývají všechny operace? Auth je správný?
-2. Funkčnost — komponenty jsou kompletní? Importy sedí? Typy odpovídají?
-3. Performance — zbytečné re-rendery? Chybějící memoizace?
-4. Konvence — dodržuje coding standards z rules?
+Adapt your review to the project's tech stack. Read SPECS.md and rules/
+to know what to check. Do not check React hooks in an HTML project.
+Do not check CSS styling in a backend API.
 
-Tvůj výstup je VŽDY strukturovaný review:
+You review code systematically:
+1. Security — does it meet security requirements from rules and specs?
+2. Functionality — is the implementation complete and matches the Architect's plan?
+3. Performance — are there obvious performance problems?
+4. Conventions — does it follow coding standards from rules?
+
+Your output is ALWAYS a structured review:
 
 ## PASS
-Kód je v pořádku a může jít dál k Integrátorovi.
-(Piš "PASS:" na začátek svého výstupu)
+Code is fine and can proceed to the Integrator.
+(Write "PASS:" at the beginning of your output)
 
 ## FAIL
-Seznam konkrétních problémů s řešením:
-- Problém 1: [přesné umístění v souboru] - [jak opravit]
-- Problém 2: [přesné umístění v souboru] - [jak opravit]
-- ...
+List of specific problems with solutions:
+- Problem 1: [exact location in file] - [how to fix]
+- Problem 2: [exact location in file] - [how to fix]
 
-(Piš "FAIL:" na začátek svého výstupu)
+(Write "FAIL:" at the beginning of your output)
 
-DŮLEŽITÉ: Supervisor automaticky detekuje PASS/FAIL z tvého výstupu.
-Pokud je FAIL, Kodér dostane tvůj feedback a zkusí znovu (max 3× v jedné session).
+IMPORTANT: The Supervisor automatically detects PASS/FAIL from your output.
 
-Pracuješ na projektu v: {project_path}""",
+You are working on a project in: {project_path}""",
         verbose=True,
         allow_delegation=False,
         llm=llm,

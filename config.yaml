@@ -1,0 +1,6 @@
+# Konfigurace projektů
+
+# Každý projekt má vlastní složku v projects/
+# a vlastní specifikace (specs/) a pravidla (rules/)
+
+projects: {}

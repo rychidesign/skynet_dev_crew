@@ -1,5 +1,6 @@
 import os
-from crewai import Agent, LLM
+from crewai import Agent
+from models import get_llm
 from tools.file_reader import create_file_reader
 from tools.file_writer import create_file_writer
 from tools.list_dir import create_list_dir
@@ -7,47 +8,40 @@ from tools.search_content import create_search_content
 
 
 def create_coder_agent(project_path: str, output_path: str = ""):
-    """Coder (Implementer) — Gemini 2.5 Flash.
-
-    Receives detailed instructions from Architect and writes actual code:
-    React components, hooks, API routes, Supabase queries, config files.
-    """
-    llm = LLM(
-        model="gemini/gemini-2.5-flash",
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        max_tokens=8192,
-    )
-
-    # Use output_path for reading/writing code (project_path for specs/docs)
+    """Coder (Implementer) — model per models.AGENT_MODELS['coder']."""
+    llm = get_llm("coder")
     code_base = output_path or project_path
 
     return Agent(
         role="Kodér",
         goal=(
-            "Implementovat kód přesně podle plánu od Architekta. "
-            "Psát čisté, funkční React komponenty, hooky, services, "
-            "Supabase queries a konfigurační soubory."
+            "Implement code exactly according to the Architect's plan. "
+            "Write clean, functional, and complete files using the technologies "
+            "the project requires."
         ),
-        backstory=f"""Jsi zkušený full-stack vývojář se specializací na
-TypeScript, React, Tailwind CSS, Supabase a Vite.
+        backstory=f"""You are an experienced full-stack developer capable of working
+with any tech stack — from simple HTML/CSS through React/Vue/Svelte to backends
+in Node.js, Python, Go, or any other language.
 
-Dostáváš jasné zadání od Architekta — tvým úkolem je ho implementovat.
-Píšeš KOMPLETNÍ soubory — nikdy nezkracuješ, nevynecháváš a nepoužíváš
-komentáře typu "... rest of code".
+Adapt to the project's technologies — read SPECS.md and rules/ to determine
+what stack is used. Do not implement anything the project does not require.
 
-DŮLEŽITÉ: Když se task vrátí od Reviewera s FAIL verdictem:
-- Pečlivě si přečti feedback co tě kritizuje
-- Uprav kód na základě kritiky
-- Zkus znovu s opravami
-- Supervisor automaticky spustí retry (max 3× v jedné session)
+You receive clear instructions from the Architect — your job is to implement them.
+You write COMPLETE files — never truncate, skip, or use comments like
+"... rest of code".
 
-Pravidla pro file_writer:
-- Vždy poskytni KOMPLETNÍ obsah souboru
-- Pokud je soubor příliš velký (SQL migrace), rozděl ho do více souborů
-- Nikdy nevolej file_writer s prázdným content
-- Vždy uveď BOTH file_path AND content
+IMPORTANT: When a task comes back from the Reviewer with a FAIL verdict:
+- Carefully read the feedback
+- Fix the code based on the criticism
+- Try again with the fixes
 
-Pracuješ na projektu v: {project_path}""",
+Rules for file_writer:
+- Always provide COMPLETE file content
+- If a file is too large, split it into multiple files
+- Never call file_writer with empty content
+- Always specify BOTH file_path AND content
+
+You are working on a project in: {project_path}""",
         verbose=True,
         allow_delegation=False,
         llm=llm,
@@ -58,5 +52,5 @@ Pracuješ na projektu v: {project_path}""",
             create_search_content(code_base),
         ],
         max_iterations=30,
-        max_execution_time=3600,  # 1 hour (increased from 600s to handle long LLM calls with retries)
+        max_execution_time=3600,
     )
