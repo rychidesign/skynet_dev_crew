@@ -459,7 +459,7 @@ def render(state: State, spinner_idx: int, rows: int, cols: int):
     header.append(f"{'─' * W}")
 
     # Token usage
-    header.append(f"  {BOLD}💰 Tokeny & náklady:{RESET}")
+
     header.append("")
     if u.agents:
         header.append(f"  {DIM}{'Agent':<14} {'Model':<28} {'Input':>8} {'Output':>8} {'Cena':>10}{RESET}")
@@ -479,27 +479,13 @@ def render(state: State, spinner_idx: int, rows: int, cols: int):
     header.append("")
     header.append(f"{'─' * W}")
 
-    # Bottom: files + errors + footer
-    recent = state.files_written[-5:] if state.files_written else []
-    bottom.append(f"  {BOLD}Soubory ({len(state.files_written)}):{RESET}")
-    for fpath in recent:
-        bottom.append(f"  {GREEN}+{RESET} {fpath}")
-    if len(state.files_written) > 5:
-        bottom.append(f"  {DIM}... a {len(state.files_written) - 5} dalších{RESET}")
-
-    if state.errors:
-        bottom.append("")
-        bottom.append(f"{'─' * W}")
-        for e in state.errors[-3:]:
-            bottom.append(f"  {RED}!{RESET} {e[:W-4]}")
-
+    # Bottom: footer
     bottom.append("")
-    bottom.append(f"{'═' * W}")
     bottom.append(f"  {DIM}Ctrl+C ukončí monitor (agenti dál běží)   {datetime.now().strftime('%H:%M:%S')}{RESET}")
 
     # ── Activity: fixed last 10 events ──────────────────────────────────
     events = list(state.activity)
-    last10 = list(reversed(events[-10:])) if events else []
+    last6 = list(reversed(events[-6:])) if events else []
 
     # ── Assemble frame ────────────────────────────────────────────────────
     buf: list[str] = []
@@ -508,9 +494,9 @@ def render(state: State, spinner_idx: int, rows: int, cols: int):
     for line in header:
         buf.append(f"{line}{EL}\n")
 
-    buf.append(f"  {BOLD}Události ({len(events)}):{RESET}{EL}\n")
-    if last10:
-        for entry in last10:
+    buf.append(f"  {BOLD}Události:{RESET}{EL}\n")
+    if last6:
+        for entry in last6:
             text, color = entry if isinstance(entry, tuple) else (entry, DIM)
             buf.append(f"  {color}{text[:W-4]}{RESET}{EL}\n")
     else:
