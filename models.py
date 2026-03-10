@@ -6,6 +6,15 @@ Usage in agents:
     llm = get_llm("architect")
 
 Switching a model = changing one string in AGENT_MODELS.
+
+PROVIDER NOTES:
+- Gemini/Anthropic: use direct providers (gemini/, anthropic/) because
+  Vercel AI Gateway does not handle provider-specific message formatting
+  (system message ordering for Gemini, assistant prefill for Anthropic).
+- OpenAI/Moonshot: work fine through Vercel AI Gateway.
+- OpenCode Go: separate endpoint from Zen! Go = /zen/go/v1, Zen = /zen/v1.
+  GLM-5 and Kimi K2.5 use OpenAI-compatible API (/chat/completions).
+  MiniMax M2.5 uses Anthropic-compatible API (/messages).
 """
 
 import os
@@ -17,14 +26,32 @@ from crewai import LLM
 # ---------------------------------------------------------------------------
 
 PROVIDERS = {
+    # Direct providers — LiteLLM handles message formatting natively
+    "google_direct": {
+        "api_key_env": "GOOGLE_API_KEY",
+        "prefix": "gemini",
+    },
+    "anthropic_direct": {
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "prefix": "anthropic",
+    },
+    # Vercel AI Gateway — works for OpenAI and Moonshot only
     "vercel": {
         "api_key_env": "VERCEL_AI_GATEWAY_API_KEY",
         "prefix": "vercel_ai_gateway",
     },
+    # OpenCode Go — $10/mo subscription, OpenAI-compatible models
+    # IMPORTANT: endpoint is /zen/go/v1, NOT /zen/v1 (that's Zen pay-as-you-go)
     "opencode_go": {
         "api_key_env": "OPENCODE_API_KEY",
-        "base_url": "https://opencode.ai/zen/v1",
-        "prefix": "openai",  # OpenAI-compatible API
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "prefix": "openai",
+    },
+    # OpenCode Go — MiniMax M2.5 uses Anthropic Messages API
+    "opencode_go_anthropic": {
+        "api_key_env": "OPENCODE_API_KEY",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "prefix": "anthropic",
     },
 }
 
@@ -34,15 +61,35 @@ PROVIDERS = {
 # ---------------------------------------------------------------------------
 
 MODELS = {
-    # === Vercel AI Gateway ===
+    # === Google (direct) ===
     "gemini-3.1-pro": {
-        "provider": "vercel",
-        "model_id": "google/gemini-3.1-pro-preview",
+        "provider": "google_direct",
+        "model_id": "gemini-3.1-pro-preview",
         "input_price": 2.0,
         "output_price": 12.0,
         "ctx": 1_000_000,
         "note": "3-tier thinking, 1M ctx, best for architecture",
     },
+    "gemini-2.5-flash": {
+        "provider": "google_direct",
+        "model_id": "gemini-2.5-flash",
+        "input_price": 0.15,
+        "output_price": 0.60,
+        "ctx": 1_000_000,
+        "note": "Fast and cheap, good for simple tasks",
+    },
+
+    # === Anthropic (direct) ===
+    "claude-sonnet-4.6": {
+        "provider": "anthropic_direct",
+        "model_id": "claude-sonnet-4-6",
+        "input_price": 3.0,
+        "output_price": 15.0,
+        "ctx": 200_000,
+        "note": "Extended thinking, cross-vendor review",
+    },
+
+    # === OpenAI via Vercel ===
     "gpt-5.1-codex-mini": {
         "provider": "vercel",
         "model_id": "openai/gpt-5.1-codex-mini",
@@ -50,23 +97,6 @@ MODELS = {
         "output_price": 2.0,
         "ctx": 400_000,
         "note": "Codex-optimized, 83.6% LiveCodeBench",
-    },
-    "claude-sonnet-4.6": {
-        "provider": "vercel",
-        "model_id": "anthropic/claude-sonnet-4.6",
-        "input_price": 3.0,
-        "output_price": 15.0,
-        "ctx": 200_000,
-        "note": "Extended thinking, cross-vendor review",
-    },
-
-    "gemini-2.5-flash": {
-        "provider": "vercel",
-        "model_id": "google/gemini-2.5-flash",
-        "input_price": 0.15,
-        "output_price": 0.60,
-        "ctx": 1_000_000,
-        "note": "Fast and cheap, good for simple tasks",
     },
 
     # === OpenCode Go ($10/mo subscription) ===
@@ -87,12 +117,12 @@ MODELS = {
         "note": "Moonshot, long-context, Go subscription",
     },
     "minimax-m2.5": {
-        "provider": "opencode_go",
+        "provider": "opencode_go_anthropic",
         "model_id": "minimax-m2.5",
         "input_price": 0.0,
         "output_price": 0.0,
         "ctx": 256_000,
-        "note": "MiniMax, low-cost coding, Go subscription",
+        "note": "MiniMax, Anthropic API, Go subscription",
     },
 }
 
@@ -104,7 +134,7 @@ MODELS = {
 AGENT_MODELS = {
     "architect":   "gemini-3.1-pro",
     "coder":       "gpt-5.1-codex-mini",
-    "reviewer":    "claude-sonnet-4.6",
+    "reviewer":    "kimi-k2.5",
     "integrator":  "kimi-k2.5",
     "junior":      "gemini-2.5-flash",
 }
@@ -165,17 +195,19 @@ def get_model_pricing() -> dict:
 def print_catalog():
     """Print overview of all available models."""
     print("\n📋 Available models:")
-    print("-" * 90)
-    print(f"{'Name':<22} {'Provider':<14} {'Model ID':<35} {'Price (in/out)':<16} {'Ctx'}")
-    print("-" * 90)
+    print("-" * 100)
+    print(f"{'Name':<22} {'Provider':<24} {'Model string':<40} {'Price':<16} {'Ctx'}")
+    print("-" * 100)
     for key, cfg in MODELS.items():
+        provider_cfg = PROVIDERS[cfg["provider"]]
+        full_id = f"{provider_cfg['prefix']}/{cfg['model_id']}"
         price = (
             f"${cfg['input_price']}/{cfg['output_price']}"
             if cfg["input_price"] > 0
             else "Go subscription"
         )
         ctx = f"{cfg['ctx']:,}"
-        print(f"{key:<22} {cfg['provider']:<14} {cfg['model_id']:<35} {price:<16} {ctx}")
+        print(f"{key:<22} {cfg['provider']:<24} {full_id:<40} {price:<16} {ctx}")
     print(f"\n🤖 Current agent assignments:")
     print("-" * 50)
     for agent, model_key in AGENT_MODELS.items():
