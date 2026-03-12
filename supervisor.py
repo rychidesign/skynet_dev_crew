@@ -355,7 +355,15 @@ def create_tasks(architect, coder, reviewer, integrator, project_path: str):
         else os.path.join(project_path, "specs", "PROGRESS.md")
     )
     progress = extract_current_context(progress_file_path)
+    current_task_name = read_current_task(progress_file_path)
     instructions = read_file(os.path.join(project_path, "instructions.md"))
+
+    task_grounding = (
+        f"══════════════════════════════════════════════════\n"
+        f"⚠️  AKTUÁLNÍ TASK: \"{current_task_name}\"\n"
+        f"Pracuješ POUZE na tomto tasku. Ignoruj ostatní.\n"
+        f"══════════════════════════════════════════════════\n\n"
+    )
 
     # LIMIT: Truncate specs to avoid huge prompts (max 3000 chars)
     if len(specs) > 3000:
@@ -382,7 +390,7 @@ def create_tasks(architect, coder, reviewer, integrator, project_path: str):
 
     # --- 1. ARCHITEKT (Plan) ---
     architect_task = Task(
-        description=f"""Analyzuj specifikaci projektu a vytvoř detailní technický plán
+        description=f"""{task_grounding}Analyzuj specifikaci projektu a vytvoř detailní technický plán
 pro AKTUÁLNÍ task označený ← CURRENT v PROGRESS.md.
 
 {file_path_hint}
@@ -420,7 +428,7 @@ Tvoje úkoly:
 
     # --- 2. KODÉR (Implement) ---
     coder_task = Task(
-        description=f"""Implementuj kód přesně podle plánu od Architekta.
+        description=f"""{task_grounding}Implementuj kód přesně podle plánu od Architekta.
 
 {file_path_hint}
 
@@ -455,8 +463,12 @@ Pravidla pro file_writer:
 
     # --- 3. REVIEWER (QA) ---
     reviewer_task = Task(
-        description=f"""Zkontroluj kód od Kodéra — hledej bugy, bezpečnostní díry
-a porušení konvencí.
+        description=f"""{task_grounding}Zkontroluj kód od Kodéra pro task: {current_task_name}
+
+⚠️  KRITICKÉ: Tvůj review MUSÍ obsahovat název tasku "{current_task_name}".
+Pokud reviewuješ jiný task, je to CHYBA.
+
+Zaměř se na to, co je potřeba pro dokončení tohoto konkrétního tasku.
 
 {file_path_hint}
 
@@ -476,17 +488,26 @@ Tvoje úkoly:
    - FUNCTIONALITY: Is the implementation complete? Do imports/references match? Does it match the plan?
    - PERFORMANCE: Are there obvious performance problems?
    - KONVENCE: Dodržuje coding standards z rules?
-4. Pokud najdeš KRITICKÉ problémy, deleguj opravu zpět na Kodéra.
+4. Pokud najdeš KRITICKÉ problémy, vrať FAIL s popisem — Supervisor zajistí retry.
 5. Vrať strukturovaný review jako svůj výstup.
+
+⚠️  POVINNÝ FORMÁT VÝSTUPU:
+Tvůj výstup MUSÍ začínat PŘESNĚ jedním z těchto řádků:
+  PASS: {current_task_name}
+  FAIL: {current_task_name}
+Následovaný popisem. Pokud tento formát nedodržíš, Supervisor vynutí retry.
+Příklad:
+  PASS: {current_task_name}
+  Kód splňuje všechny požadavky...
 """,
         agent=reviewer,
-        expected_output="Strukturovaný code review — PASS nebo FAIL s popisem problémů",
+        expected_output=f"Strukturovaný code review pro '{current_task_name}' — výstup MUSÍ začínat 'PASS: Task X.X' nebo 'FAIL: Task X.X' následovaný popisem",
         context=[coder_task],
     )
 
     # --- 4. INTEGRÁTOR (Assemble) ---
     integrator_task = Task(
-        description=f"""Finalizuj task — sjednoť kód, aktualizuj importy a ověř konzistenci.
+        description=f"""{task_grounding}Finalizuj task — sjednoť kód, aktualizuj importy a ověř konzistenci.
 
 {file_path_hint}
 
@@ -568,7 +589,7 @@ def _main_body():
 
     architect = create_architect_agent(project_path)
     coder = create_coder_agent(project_path, output_path=output_dir)
-    reviewer = create_reviewer_agent(project_path)
+    reviewer = create_reviewer_agent(project_path, output_path=output_dir)
     integrator = create_integrator_agent(project_path, output_path=output_dir)
 
     agents_map = {
@@ -645,37 +666,96 @@ def _main_body():
 
                 save_usage(agents_map)
 
-                # #region Parse reviewer verdict from result
-                result_text = str(result).upper() if result else ""
-                is_fail_verdict = "FAIL" in result_text
-                # #endregion
+                # ── Parse reviewer verdict ──────────────────────────
+                # DŮLEŽITÉ: crew.kickoff() vrací výstup POSLEDNÍHO tasku
+                # (Integrátor), ne Reviewera. Proto musíme číst tasks[2].output.
+                reviewer_output = ""
+                if len(tasks) > 2 and tasks[2].output:
+                    reviewer_output = str(tasks[2].output)
+                else:
+                    # Fallback: pokud task output není dostupný, použij result
+                    reviewer_output = str(result) if result else ""
+
+                reviewer_text_upper = reviewer_output.upper()
+                is_fail_verdict = "FAIL" in reviewer_text_upper
+
+                # Validace — Reviewer reviewoval SPRÁVNÝ task?
+                if not is_fail_verdict:
+                    import re
+                    task_id_match = re.search(r"Task\s+(\d+\.\d+)", current_task_name)
+                    task_id = task_id_match.group(1) if task_id_match else None
+
+                    if task_id and task_id not in reviewer_output:
+                        print(f"⚠️  VALIDACE: Reviewer pravděpodobně reviewoval špatný task!")
+                        print(f"   Očekáváno: {current_task_name} (id: {task_id})")
+                        print(f"   Ve výstupu Reviewera nenalezeno.")
+                        print(f"   Reviewer output (300 zn.): {reviewer_output[:300]}")
+                        send_telegram_message(
+                            f"⚠️ Reviewer reviewoval špatný task!\n"
+                            f"Očekáváno: {current_task_name}\n"
+                            f"Vynucen FAIL → retry"
+                        )
+                        is_fail_verdict = True
+                # ── Konec reviewer validace ─────────────────────────
+
+                # Audit log pro task výsledky
+                try:
+                    output_dir = os.path.join(project_path, "output")
+                    audit_entry = {
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "task": current_task_name,
+                        "attempt": attempt,
+                        "verdict": "FAIL" if is_fail_verdict else "PASS",
+                        "result_preview": str(result)[:500] if result else None,
+                        "output_files": sorted(os.listdir(output_dir)) if os.path.exists(output_dir) else [],
+                    }
+                    audit_path = "logs/tasks_audit.jsonl"
+                    os.makedirs("logs", exist_ok=True)
+                    with open(audit_path, "a") as f:
+                        f.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    pass  # Audit log je best-effort
 
                 # Supervisor sám posune PROGRESS.md — ale JEN když je PASS
                 # Pokud je FAIL, task zůstane v [ ] a ← CURRENT zůstane tam
                 if not is_fail_verdict:
-                    advance_progress(progress_file, current_task_name)
-                    remaining = count_remaining(progress_file)
-                    next_task = read_current_task(progress_file)
-
-                    if remaining > 0:
-                        next_line = f"Další: → {next_task}" if next_task and next_task != "?" else ""
-                        message = (
-                            f"✓ Hotovo:\n"
-                            f" ⌊ {current_task_name}\n"
-                            f" ⌊ {next_line}\n"
-                            f" Zbývá {remaining} tasků"
-                        )
+                    # Output sanity check: ověř, že očekávané soubory existují
+                    output_dir = os.path.join(project_path, "output")
+                    expected_outputs_missing = False
+                    
+                    if "image" in current_task_name.lower() or "Generate" in current_task_name:
+                        images_dir = os.path.join(output_dir, "public", "images")
+                        if not os.path.exists(images_dir) or not os.listdir(images_dir):
+                            print(f"⚠️  OUTPUT CHECK: Task {current_task_name} měl generovat obrázky, ale images/ je prázdný!")
+                            expected_outputs_missing = True
+                    
+                    if expected_outputs_missing:
+                        print(f"   Vynucen FAIL → retry")
+                        is_fail_verdict = True
                     else:
-                        output_path = os.path.join(project_path, "output")
-                        message = (
-                            f"🎉 Projekt '{project_name}' je KOMPLETNĚ hotový!\n"
-                            f"📁 Soubory: {os.path.abspath(output_path)}"
-                        )
-                    send_telegram_message(message)
-                    print(message)
-                    tasks_done += 1
-                    task_succeeded = True
-                    break
+                        advance_progress(progress_file, current_task_name)
+                        remaining = count_remaining(progress_file)
+                        next_task = read_current_task(progress_file)
+
+                        if remaining > 0:
+                            next_line = f"Další: → {next_task}" if next_task and next_task != "?" else ""
+                            message = (
+                                f"✓ Hotovo:\n"
+                                f" ⌊ {current_task_name}\n"
+                                f" ⌊ {next_line}\n"
+                                f" Zbývá {remaining} tasků"
+                            )
+                        else:
+                            output_path = os.path.join(project_path, "output")
+                            message = (
+                                f"🎉 Projekt '{project_name}' je KOMPLETNĚ hotový!\n"
+                                f"📁 Soubory: {os.path.abspath(output_path)}"
+                            )
+                        send_telegram_message(message)
+                        print(message)
+                        tasks_done += 1
+                        task_succeeded = True
+                        break
                 else:
                     # Task FAILED — zkusit znovu v rámci session (max 3 pokusy)
                     print(f"⚠️  Task {current_task_name} FAILED review — automaticky zkouším znovu...")
@@ -693,6 +773,7 @@ def _main_body():
                             tasks=tasks,
                             verbose=True,
                             process=Process.sequential,
+                            step_callback=_step_callback,
                         )
                         # continue = zkusit znovu z for loopu
                         continue
@@ -738,6 +819,7 @@ def _main_body():
                         tasks=tasks,
                         verbose=True,
                         process=Process.sequential,
+                        step_callback=_step_callback,
                     )
                     continue
 

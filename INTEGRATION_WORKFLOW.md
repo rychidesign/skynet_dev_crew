@@ -1,24 +1,41 @@
-# Multiagent Integration Workflow – CRÍTICO
+# Multiagent Integration Workflow – AKTUALIZOVÁNO 2025-03-11
 
-## Problem 1: "Agent Integrator asks who marks task as complete?"
+## Historie změn
 
-This document clarifies the **exact responsibilities** for each agent role when managing PROGRESS.md.
+| Datum | Verze | Změna |
+|-------|-------|-------|
+| 2025-03-11 | 2.0 | Přidán task grounding, validace výstupu, output sanity check, audit log |
+| Původní | 1.0 | Init: Retry loop, Supervisor-driven progress |
 
-## Problem 2: "Why doesn't Coder automatically retry when Reviewer returns FAIL?"
+---
 
-**Context:** When Reviewer finds bugs and returns FAIL with feedback, Coder should automatically try to fix them.
+## Problém: Reviewer reviewuje špatný task
 
-**Solution:** Supervisor now implements **automatic retry loop** (max 3 attempts per session):
+**Příklad chyby:** Task 2.4 (Generate images), ale Reviewer dal PASS pro Task 1.1 (HTML skeleton).
 
-1. **Run 1:** Architect → Coder → Reviewer
-   - Reviewer returns FAIL with feedback
-2. **Supervisor parses verdict:** Detects "FAIL" in output
-3. **Retry triggered:** Supervisor waits 5s and runs the same crew again
-4. **Run 2:** Architect (updates plan) → Coder (reads feedback, fixes) → Reviewer
-   - If PASS: Done! advance_progress() runs
-   - If FAIL again: Continue to Run 3
-5. **Run 3:** Same pipeline, final attempt
-6. **After attempt 3:** If still FAIL, supervisor stops and awaits manual intervention
+**Důsledky:**
+- PROGRESS.md posunut na základě nevalidního review
+- Obrázky nikdy negenerovány
+- Dominový efekt chyb
+
+**Řešení (v2.0):**
+1. **Task grounding prefix** — každý task dostává explicitní "AKTUÁLNÍ TASK: X"
+2. **Validace výstupu** — Supervisor kontroluje, zda výstup obsahuje správný task ID
+3. **Output sanity check** — pro image tasky se ověřuje existence souborů
+
+---
+
+## Problém: Integrátor se ukončí uprostřed práce
+
+**Příklad chyby:** Integrator Final Answer obsahuje jen "Action: list_dir" místo skutečné odpovědi.
+
+**Důsledky:**
+- Neúplný výstup
+- Chybějící finalizace
+
+**Řešení (v2.0):**
+- Graceful exit instrukce v Integrator backstory
+- max_iterations: 30 (dostatek pro dokončení práce)
 
 ---
 
@@ -28,109 +45,152 @@ This document clarifies the **exact responsibilities** for each agent role when 
 ┌─────────────────────────────────────────────────────────────────┐
 │                        SUPERVISOR                               │
 │ ┌────────────────────────────────────────────────────────────┐  │
-│ │ for attempt in range(1, 4):                               │  │
+│ │ for attempt in range(1, max_attempts+1):                  │  │
 │ │   - Reads current task from PROGRESS.md (← CURRENT)       │  │
-│ │   - Creates 4-stage crew: Architect → Coder → Reviewer    │  │
-│ │                           → Integrator                     │  │
-│ │   - Executes crew.kickoff()                               │  │
-│ │   - PARSES reviewer verdict (PASS or FAIL)                │  │
-│ │   - IF PASS:   advance_progress() marks [x] & moves ←     │  │
-│ │            break (exit loop)                              │  │
-│ │   - IF FAIL:                                              │  │
-│ │        if attempt < 3: wait 5s & continue (retry)         │  │
-│ │        else: stop, await manual intervention               │  │
+│ │   - Creates fresh crew with task_grounding prefix         │  │
+│ │   - Executes: Architekt → Kodér → Reviewer → Integrátor  │  │
+│ │   - VALIDATES: reviewer output contains correct task ID   │  │
+│ │   - OUTPUT CHECK: verify expected files exist             │  │
+│ │   - PARSES verdict (PASS or FAIL)                        │  │
+│ │   - IF PASS:  advance_progress() → [x] & ← move          │  │
+│ │   - IF FAIL:  if attempt < max → retry else stop         │  │
 │ └────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+---
+
 ## Clear Role Definition
 
-### 🏗️ Architect
+### 🏛️ Architekt
 - **Role:** Plan
 - **Task:** Create detailed implementation plan
 - **Progress.md:** ❌ DO NOT TOUCH
-- **On Retry:** Updates plan based on Reviewer's feedback (if needed)
+- **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
+- **On Retry:** Updates plan based on Reviewer's feedback
 
-### 💻 Coder
+### 💻 Kodér
 - **Role:** Implement
 - **Task:** Write code according to plan
 - **Progress.md:** ❌ DO NOT TOUCH
-- **On Retry:** Reads Reviewer's FAIL feedback and fixes the issues
-- **Expected:** Fixes should be applied in 2nd/3rd attempt
+- **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
+- **On Retry:** Reads Reviewer's FAIL feedback and fixes issues
 
 ### 🔍 Reviewer
 - **Role:** QA / Security / Code Review
 - **Output:** Structured review with verdict: **PASS** or **FAIL**
 - **Progress.md:** ❌ DO NOT TOUCH
-- **Delegation:** Can return to Coder via `allow_delegation=True` (within same kickoff)
-- **IMPORTANT:** Must start output with either **"PASS:"** or **"FAIL:"** for Supervisor to detect it
+- **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
+- **Validace:** Supervisor ověřuje, že output obsahuje správný task ID
+- **⚠️ IMPORTANT:** Must start output with **"PASS:"** or **"FAIL:"**
+- **⚠️ DELEGATION REMOVED:** Cannot delegate — return FAIL and Supervisor handles retry
 
-### 🔗 Integrator
+### 🔗 Integrátor
 - **Role:** Assembly & Final Checks
-- **Task:** Update imports, routing, barrel exports, verify consistency
+- **Task:** Update imports, routing, verify consistency
 - **Progress.md:** ❌ **ABSOLUTELY DO NOT TOUCH**
-- **Why?** Supervisor handles ALL progress state based on Reviewer verdict
+- **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
+- **Graceful exit:** Musí dokončit VŠECHNY tool caily před finální odpovědí
 
 ### 👑 Supervisor
 - **Role:** Orchestrator + Retry Loop Manager
-- **Task:** Manage workflow and task state
+- **Task:** Manage workflow, validate outputs, task state
 - **Progress.md:** ✅ **ONLY SUPERVISOR MODIFIES IT**
-- **Verdict Parsing:**
-  - If `result.contains("PASS")`: calls `advance_progress()` → marks [x], moves ←, breaks loop
-  - If `result.contains("FAIL")`: If attempt < 3 → retry with same crew, else stop
-- **Max Retries:** 3 attempts per session (configurable)
 
 ---
 
-## Workflow Examples
+## Nové bezpečnostní mechanismy (v2.0)
 
-### Example 1: Task FAILS once, then PASSES
-
-**Run 1 (Attempt 1/3):**
+### 1. Task Grounding Prefix
 ```
-Supervisor reads:  [ ] ← CURRENT Task 4.2
-Architect → Plan (detailed breakdown)
-Coder → Implement according to plan
-Reviewer → FAIL: "Missing error handling in ClientList component"
-Integrator → (not called, crew exits with FAIL verdict)
-Supervisor parses: result contains "FAIL"
-Action: Do NOT call advance_progress()
-Decision: attempt=1 < max_attempts=3 → wait 5s → continue
+══════════════════════════════════════════════════
+⚠️  AKTUÁLNÍ TASK: "Task 2.4: Generate hero + service images"
+Pracuješ POUZE na tomto tasku. Ignoruj ostatní.
+══════════════════════════════════════════════════
 ```
 
-**Run 2 (Attempt 2/3):**
-```
-Supervisor reads:  [ ] ← CURRENT Task 4.2  (same as before!)
-Architect → Updates plan with error handling patterns
-Coder → Reads Reviewer's feedback, adds error handling
-Reviewer → PASS: "Error handling looks good!"
-Integrator → Verifies imports, consistency
-Supervisor parses: result contains "PASS"
-Action: Call advance_progress("Task 4.2")
-Result: PROGRESS.md updated:
-        [x] Task 4.2
-        [ ] ← CURRENT Task 4.3  (moved forward)
-Break loop → session ends successfully
+### 2. Reviewer Output Validation
+```python
+# Ověř, že Reviewer reviewoval SPRÁVNÝ task
+task_id_match = re.search(r"Task\s+(\d+\.\d+)", current_task_name)
+task_id = task_id_match.group(1) if task_id_match else current_task_name
+
+if task_id and task_id not in str(result):
+    print(f"⚠️ VALIDACE: Reviewer reviewoval špatný task!")
+    is_fail_verdict = True  # Vynutit retry
 ```
 
-### Example 2: Task FAILS 3 times → manual intervention
-
-**Run 1, 2, 3:**
-- All return FAIL with different feedback from Reviewer
-- Each time Coder tries to fix but new issues arise
-
-**After Attempt 3:**
-```
-Supervisor parses: result contains "FAIL" AND attempt=3 >= max_attempts=3
-Action: Do NOT call advance_progress()
-Message:
-  ❌ Task FAILED po 3 pokusech: Task 4.2
-  🔄 Vrácen Kodérovi — prosím, zkontroluj manuálně.
-  ⏳ Oprav a spusť supervisor znovu.
-Break loop → session ends, awaits manual fix
+### 3. Output Sanity Check
+```python
+# Pro image tasky ověř, že soubory existují
+if "image" in task_name.lower() or "Generate" in task_name:
+    images_dir = os.path.join(output_dir, "public", "images")
+    if not os.path.exists(images_dir) or not os.listdir(images_dir):
+        is_fail_verdict = True  # Vynutit retry
 ```
 
-Human must manually debug, fix the issue in `output/`, then re-run supervisor.
+### 4. Audit Log
+```python
+# Ulož strukturovaný záznam každého tasku
+audit_entry = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    "task": current_task_name,
+    "attempt": attempt,
+    "verdict": "FAIL" if is_fail_verdict else "PASS",
+    "output_files": sorted(os.listdir(output_dir)),
+}
+# → logs/tasks_audit.jsonl
+```
+
+---
+
+## Retry Loop (max 5 attempts)
+
+```
+Run 1: Architekt → Kodér → Reviewer → Integrátor
+       ↓
+Supervisor validates: task ID present? files exist?
+       ↓
+If PASS: advance_progress() → next task
+If FAIL: retry (max 5 attempts)
+```
+
+**Na rozdíl od v1.0:**
+- Tasks se regenerují při každém retry (čerstvý os.listdir)
+- step_callback se předává i do retry crew
+- Output sanity check před advance_progress
+
+---
+
+## Workflow Example: Task with Validation
+
+**Task 2.4: Generate hero + service images**
+
+```
+Supervisor reads:  [ ] ← CURRENT Task 2.4: Generate hero + service images
+
+[TASK GROUNDING PREFIX APPLIED]
+
+Run 1:
+  Architekt → Plan (image generation prompts)
+  Kodér → Calls image_generator tool
+  Reviewer → FAIL: "Images not generated - no output directory"
+  Integrátor → (not called due to FAIL)
+
+Supervisor validates:
+  ✓ Task ID "2.4" found in output? ❌ NO (Reviewer mentioned Task 1.1!)
+  → VALIDATION FAIL → is_fail_verdict = True
+
+Retry 2:
+  [FRESH TASKS REGENERATED]
+  Kodér → Generates images, saves to output/public/images/
+  Reviewer → PASS
+  Integrátor → Verifies files exist
+
+Supervisor output check:
+  ✓ images/public/ exists with files? YES
+  → advance_progress() → Task 2.4 marked [x]
+```
 
 ---
 
@@ -138,46 +198,64 @@ Human must manually debug, fix the issue in `output/`, then re-run supervisor.
 
 ### For Reviewer Agent
 - **Output format:** Start with **"PASS:"** or **"FAIL:"** (case-insensitive)
-- **When FAIL:** Include specific problems with file locations and suggested fixes
-- **Delegation:** When problems are found, you can return to Coder for fixes
-- **Within same kickoff:** Your feedback is read by Coder in the same run
+- **Task grounding:** Your prompt explicitly states which task to review
+- **Validation:** Supervisor will reject if your output doesn't contain the correct task ID
+- **Delegation:** REMOVED — return FAIL and Supervisor handles retry
 
 ### For Coder Agent
-- **On Retry:** You will see the same plan + Reviewer's feedback together
-- **Read feedback carefully:** Each retry is a chance to fix specific issues
-- **Expected:** Most issues should be fixable within 2-3 attempts
+- **On Retry:** You will see fresh output directory listing
+- **Image generation:** Use `image_generator` tool for image tasks
+- **Verify output:** Always check that files were created
+
+### For Integrator Agent
+- **Graceful exit:** Complete ALL tool calls before returning final answer
+- **Final output:** Must be "OK" or "PROBLÉMY:" + list
+- **Never exit mid-tool-call**
 
 ### For Supervisor
-- **Verdict detection:**
+- **Validation flow:**
   ```python
-  result_text = str(result).upper() if result else ""
+  result = crew.kickoff()
+  result_text = str(result).upper()
   is_fail_verdict = "FAIL" in result_text
-  ```
-- **Retry loop:**
-  ```python
-  for attempt in range(1, max_attempts + 1):
-    result = crew.kickoff()
-    if not is_fail_verdict:
-      advance_progress(...)
-      break
-    elif attempt < max_attempts:
-      wait 5s
-      continue
-    else:
-      stop & await manual fix
-  ```
 
-### For Task Definitions
-- Reviewer output goes directly to `result` object (not saved to file)
-- Each retry uses fresh crew instance with same tasks
-- Task file paths don't change between retries
+  # 1. Validate task ID
+  if task_id not in result_text:
+      is_fail_verdict = True  # Force retry
+
+  # 2. Output sanity check
+  if "image" in task_name and not images_exist:
+      is_fail_verdict = True  # Force retry
+
+  # 3. Advance or retry
+  if not is_fail_verdict:
+      advance_progress()
+  ```
 
 ---
 
 ## Related Code
 
-- `supervisor.py` — Main loop with retry logic (lines ~600-700)
-- `agents/reviewer.py` — Verdict format + delegation
-- `agents/coder.py` — Retry feedback handling
-- `projects/taskmanager/specs/PROGRESS.md` — Task definitions
-- `SUPERVISOR_USAGE.md` — Usage guide and troubleshooting
+| Soubor | Popis |
+|--------|-------|
+| `supervisor.py` | Main loop, task grounding, validation, retry (lines ~350-840) |
+| `agents/reviewer.py` | Verdict format |
+| `agents/integrator.py` | Graceful exit instructions |
+| `agents/coder.py` | Image generator tool |
+| `logs/tasks_audit.jsonl` | Audit log (v2.0+) |
+
+---
+
+## Konfigurace (models.py)
+
+```python
+AGENT_MODELS = {
+    "architect":   "gemini-3.1-pro",
+    "coder":       "gpt-5.1-codex-mini",
+    "reviewer":    "minimax-m2.5",  # ← ZMĚNA z glm-5
+    "integrator":  "kimi-k2.5",
+}
+
+# Retry config
+max_attempts = 5  # ↑ ZMĚNA z 3
+```

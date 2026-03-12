@@ -5,6 +5,7 @@ from tools.file_reader import create_file_reader
 from tools.file_writer import create_file_writer
 from tools.list_dir import create_list_dir
 from tools.search_content import create_search_content
+from tools.image_generator import create_image_generator
 
 
 def create_coder_agent(project_path: str, output_path: str = ""):
@@ -50,6 +51,7 @@ You are working on a project in: {project_path}""",
             create_file_writer(code_base),
             create_list_dir(code_base),
             create_search_content(code_base),
+            create_image_generator(code_base),
         ],
         max_iterations=30,
         max_execution_time=3600,

@@ -38,6 +38,12 @@ Rules for file_writer:
 - Never call file_writer with empty content
 - Always specify BOTH file_path AND content
 
+⚠️  GRACEFUL EXIT:
+- Before returning final answer, complete ALL pending tool calls.
+- Your FINAL output must be "OK" or "PROBLÉMY:" + list.
+- NEVER exit mid-tool-call or mid-reasoning.
+- If you cannot finish, return "PROBLÉMY:" with what remains.
+
 You are working on a project in: {project_path}""",
         verbose=True,
         allow_delegation=False,

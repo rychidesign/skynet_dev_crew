@@ -6,6 +6,7 @@ from .list_dir import ListDirTool, create_list_dir
 from .find_files import FindFilesTool, create_find_files
 from .search_content import SearchContentTool, create_search_content
 from .lint_check import LintCheckTool, create_lint_check
+from .image_generator import ImageGeneratorTool, create_image_generator
 
 __all__ = [
     "send_telegram_message",
@@ -23,4 +24,6 @@ __all__ = [
     "create_find_files",
     "create_search_content",
     "create_lint_check",
+    "ImageGeneratorTool",
+    "create_image_generator",
 ]

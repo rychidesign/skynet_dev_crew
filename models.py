@@ -133,7 +133,7 @@ MODELS = {
 
 AGENT_MODELS = {
     "architect":   "gemini-3.1-pro",
-    "coder":       "gpt-5.1-codex-mini",
+    "coder":       "gemini-3.1-pro",
     "reviewer":    "kimi-k2.5",
     "integrator":  "kimi-k2.5",
     "junior":      "gemini-2.5-flash",

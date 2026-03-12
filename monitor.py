@@ -210,11 +210,6 @@ def parse_log(path: str, prev_size: int, state: State) -> State:
             state.current_task = line
             state.phase = "Task běží"
             state.activity.append((f"{now_str}  🚀 {line}", WHITE))
-            # #region agent log H2/H5 post-fix
-            import json as _json
-            with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-                _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:parse_log', 'message': 'task start resolved (multi-line)', 'data': {'task': line}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H2_postfix', 'runId': 'post-fix'}) + '\n')
-            # #endregion
             continue
 
         if state._pending_task_done and "⌊" in line:
@@ -223,11 +218,6 @@ def parse_log(path: str, prev_size: int, state: State) -> State:
             state.tasks_done += 1
             state.phase = f"✅ {done_name} dokončen"
             state.activity.append((f"{now_str}  ✅ {done_name}", GREEN))
-            # #region agent log H2 post-fix
-            import json as _json
-            with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-                _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:parse_log', 'message': 'task done resolved (multi-line)', 'data': {'done': done_name}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H2_postfix', 'runId': 'post-fix'}) + '\n')
-            # #endregion
             continue
 
         if "Crew Execution Started" in line:
@@ -378,12 +368,6 @@ def _alive_checker_loop():
         with _alive_lock:
             prev_val = _alive_value
             _alive_value = val
-        # #region agent log H3
-        if prev_val != val:
-            import json as _json
-            with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-                _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:alive_checker', 'message': 'alive status changed', 'data': {'prev': prev_val, 'new': val}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H3'}) + '\n')
-        # #endregion
         time.sleep(3)
 
 def _start_alive_checker():
@@ -406,12 +390,6 @@ def render(state: State, spinner_idx: int, rows: int, cols: int):
 
     alive = _get_alive()
 
-    # #region agent log H3/H1 — render snapshot every 30s
-    if spinner_idx % 30 == 0:
-        import json as _json
-        with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-            _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:render', 'message': 'render snapshot', 'data': {'alive': alive, 'phase': state.phase, 'current_task': state.current_task, 'spinner_idx': spinner_idx}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H3_H1'}) + '\n')
-    # #endregion
     u = state.usage
 
     # ── Build fixed sections (everything except activity) ─────────────────
@@ -525,12 +503,6 @@ def main():
     prev_size = 0
     spinner_idx = 0
 
-    # #region agent log H1/H4 post-fix
-    import json as _json
-    with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-        _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:startup', 'message': 'startup state (post-fix)', 'data': {'PROGRESS_FILE': PROGRESS_FILE, 'initial_current_task': state.current_task, 'LOG_FILE': LOG_FILE}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H1_H4', 'runId': 'post-fix'}) + '\n')
-    # #endregion
-
     try:
         while True:
             try:
@@ -548,11 +520,6 @@ def main():
                 progress_task = read_current_task_from_progress()
                 if progress_task != "—":
                     state.current_task = progress_task
-                # #region agent log H1 post-fix
-                import json as _json
-                with open('/home/rychi/.cursor/debug-d81e29.log', 'a') as _f:
-                    _f.write(_json.dumps({'sessionId': 'd81e29', 'location': 'monitor.py:main_loop', 'message': 'PROGRESS.md re-read', 'data': {'progress_task': progress_task, 'state_current_task': state.current_task}, 'timestamp': int(time.time() * 1000), 'hypothesisId': 'H1_postfix', 'runId': 'post-fix'}) + '\n')
-                # #endregion
 
             render(state, spinner_idx, rows, cols)
             spinner_idx += 1

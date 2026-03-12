@@ -8,9 +8,16 @@ from tools.search_content import create_search_content
 from tools.lint_check import create_lint_check
 
 
-def create_reviewer_agent(project_path: str):
-    """Reviewer (QA) — model per models.AGENT_MODELS['reviewer']."""
+def create_reviewer_agent(project_path: str, output_path: str = ""):
+    """Reviewer (QA) — model per models.AGENT_MODELS['reviewer'].
+    
+    Args:
+        project_path: Root path of the project (for specs, rules, etc.)
+        output_path: Path to output directory where Coder writes files.
+                     If empty, falls back to project_path.
+    """
     llm = get_llm("reviewer")
+    code_base = output_path or project_path
 
     return Agent(
         role="Reviewer",
@@ -50,16 +57,17 @@ List of specific problems with solutions:
 
 IMPORTANT: The Supervisor automatically detects PASS/FAIL from your output.
 
-You are working on a project in: {project_path}""",
+You are working on a project in: {project_path}
+Code output directory: {code_base}""",
         verbose=True,
         allow_delegation=False,
         llm=llm,
         tools=[
-            create_file_reader(project_path),
-            create_list_dir(project_path),
-            create_find_files(project_path),
-            create_search_content(project_path),
-            create_lint_check(project_path),
+            create_file_reader(code_base),
+            create_list_dir(code_base),
+            create_find_files(code_base),
+            create_search_content(code_base),
+            create_lint_check(code_base),
         ],
         max_iterations=15,
         max_execution_time=1800,
