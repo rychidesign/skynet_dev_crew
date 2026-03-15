@@ -12,8 +12,10 @@ import os
 import sys
 import time
 import yaml
+from typing import Tuple, Any, Union
 from dotenv import load_dotenv
 from crewai import Crew, Task, Process
+from crewai.tasks.task_output import TaskOutput
 
 from agents.architect import create_architect_agent
 from agents.coder import create_coder_agent
@@ -489,6 +491,69 @@ Pravidla pro file_writer:
     )
 
 
+def validate_reviewer_output(result) -> Tuple[bool, Any]:
+    """CrewAI Task Guardrail: ověří formát PASS/FAIL a použití nástrojů.
+    
+    Vrací (True, output) pokud vše OK.
+    Vrací (False, chybová zpráva) pokud je problém — CrewAI donutí agenta opravit.
+    """
+    if not result or not getattr(result, 'raw', None):
+        return (False, "Výstup je prázdný. Musíš vrátit review začínající 'PASS:' nebo 'FAIL:'.")
+    
+    output_text = result.raw
+    
+    # 1. Ověř formát PASS/FAIL na prvním řádku
+    first_line = ""
+    for line in output_text.strip().splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped.upper()
+            break
+    
+    if not (first_line.startswith("PASS:") or first_line.startswith("PASS ") or
+            first_line.startswith("FAIL:") or first_line.startswith("FAIL ")):
+        return (
+            False,
+            "⚠️ Tvůj výstup MUSÍ začínat na prvním řádku slovem 'PASS:' nebo 'FAIL:' "
+            "následovaným názvem tasku. Oprav formát a vrať review znovu.\n"
+            f"Aktuální první řádek: '{first_line[:80]}'"
+        )
+    
+    # 2. Ověř evidence použití nástrojů
+    text_lower = output_text.lower()
+    
+    has_dir_evidence = any(indicator in text_lower for indicator in [
+        "list_dir", "directory listing", "soubory v", "files in",
+        "├──", "└──", "[dir]", "[file]",
+    ])
+    
+    has_size_evidence = any(indicator in text_lower for indicator in [
+        "size_check", "directory_size", "file_size",
+        "lines (max", "within size limits", "within limits",
+        "exceed", "řádků", "lines",
+    ])
+    
+    missing = []
+    if not has_dir_evidence:
+        missing.append("list_dir (musíš prozkoumat adresářovou strukturu)")
+    if not has_size_evidence:
+        missing.append("directory_size_check (musíš zkontrolovat velikosti souborů)")
+    
+    if missing:
+        return (
+            False,
+            "⚠️ Tvůj review NEOBSAHUJE důkazy o použití povinných nástrojů:\n"
+            + "\n".join(f"  - {m}" for m in missing) + "\n\n"
+            "POVINNÉ KROKY před vydáním verdiktu:\n"
+            "1. Použij list_dir na output adresář\n"
+            "2. Použij directory_size_check na output adresář\n"
+            "3. Přečti klíčové soubory pomocí file_reader\n"
+            "Pak vrať review znovu s výsledky těchto kontrol."
+        )
+    
+    return (True, output_text)
+
+
 def create_reviewer_task(reviewer, project_path: str, output_dir: str, current_task_name: str):
     """Create reviewer task - runs after coder."""
     progress_file_path = (
@@ -561,6 +626,8 @@ Příklad:
 """,
         agent=reviewer,
         expected_output=f"Strukturovaný code review pro '{current_task_name}' — výstup MUSÍ začínat 'PASS: Task X.X' nebo 'FAIL: Task X.X' následovaný popisem",
+        guardrail=validate_reviewer_output,
+        guardrail_max_retries=2,
     )
 
 
@@ -663,6 +730,182 @@ def check_reviewer_verdict(reviewer_output: str, current_task_name: str) -> tupl
     return False, f"Reviewer output does not start with PASS or FAIL. First line: '{first_line[:80]}'"
 
 
+def _is_transient_error(e: Exception) -> bool:
+    """Rozpoznej přechodné chyby, které stojí za retry."""
+    error_str = str(e)
+    return any(indicator in error_str for indicator in [
+        "429", "rate_limit", "timeout", "connection",
+        "503", "502", "UNAVAILABLE", "None or empty",
+    ])
+
+
+def run_architect_phase(
+    architect, project_path: str, output_dir: str,
+    current_task_name: str, agents_map: dict, step_callback
+):
+    """FÁZE 1: Architekt — spustí se jednou na začátku tasku."""
+    print("=" * 60)
+    print("📐 FÁZE 1: ARCHITEKT")
+    print("=" * 60 + "\n")
+    
+    architect_task = create_architect_task(architect, project_path, output_dir, current_task_name)
+    
+    crew_architect = Crew(
+        agents=[architect],
+        tasks=[architect_task],
+        verbose=True,
+        process=Process.sequential,
+        step_callback=step_callback,
+    )
+    
+    try:
+        crew_architect.kickoff()
+    except Exception as e:
+        error_message = f"❌ Architekt selhal: {str(e)[:500]}"
+        print(error_message)
+        send_telegram_message(error_message)
+        raise
+    
+    save_usage(agents_map)
+    return architect_task
+
+
+def run_code_review_phase(
+    coder, reviewer, architect_task,
+    project_path: str, output_dir: str, current_task_name: str,
+    agents_map: dict, step_callback,
+    max_attempts: int = 5,
+):
+    """FÁZE 2: Kodér + Reviewer smyčka. Vrací (passed, reviewer_task)."""
+    reviewer_passed = False
+    previous_reviewer_feedback = ""
+    reviewer_task = None
+    
+    for attempt in range(1, max_attempts + 1):
+        print("\n" + "=" * 60)
+        print(f"🔄 FÁZE 2: KODÉR + REVIEWER (pokus {attempt}/{max_attempts})")
+        print("=" * 60 + "\n")
+        
+        # 2a: Kodér
+        coder_task = create_coder_task(
+            coder, project_path, output_dir, current_task_name,
+            architect_task, previous_reviewer_feedback
+        )
+        crew_coder = Crew(
+            agents=[coder], tasks=[coder_task],
+            verbose=True, process=Process.sequential,
+            step_callback=step_callback,
+        )
+        
+        try:
+            crew_coder.kickoff()
+        except Exception as e:
+            if _is_transient_error(e) and attempt < max_attempts:
+                wait = min(10 * attempt, 60)
+                print(f"▶ Přechodná chyba, čekám {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
+        
+        save_usage(agents_map)
+        
+        # 2b: Reviewer
+        reviewer_task = create_reviewer_task(reviewer, project_path, output_dir, current_task_name)
+        crew_reviewer = Crew(
+            agents=[reviewer], tasks=[reviewer_task],
+            verbose=True, process=Process.sequential,
+            step_callback=step_callback,
+        )
+        
+        try:
+            crew_reviewer.kickoff()
+        except Exception as e:
+            if _is_transient_error(e) and attempt < max_attempts:
+                wait = min(10 * attempt, 60)
+                print(f"▶ Přechodná chyba, čekám {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
+        
+        save_usage(agents_map)
+        
+        # Vyhodnocení
+        reviewer_output = ""
+        if reviewer_task.output:
+            reviewer_output = str(reviewer_task.output)
+        else:
+            empty_msg = (
+                f"⚠️ Reviewer vrátil PRÁZDNÝ výstup (pokus {attempt}/{max_attempts}). "
+                f"Možné příčiny: max_iterations vyčerpán, LLM timeout, nebo guardrail selhání."
+            )
+            print(empty_msg)
+            send_telegram_message(empty_msg)
+            
+            previous_reviewer_feedback = (
+                "Reviewer nebyl schopen dokončit review (prázdný výstup). "
+                "Zkontroluj, že všechny soubory existují a jsou čitelné. "
+                "Spusť file_size_check na každý soubor."
+            )
+            if attempt < max_attempts:
+                wait = 5
+                print(f"⏳ Čekám {wait}s před retry...\n")
+                time.sleep(wait)
+                continue
+            return False, None
+        
+        is_pass, reason = check_reviewer_verdict(reviewer_output, current_task_name)
+        
+        if is_pass:
+            print(f"\n✅ Reviewer: PASS - {reason}")
+            return True, reviewer_task
+        
+        print(f"\n⚠️  Reviewer: FAIL - {reason} (pokus {attempt}/{max_attempts})")
+        
+        previous_reviewer_feedback = extract_fail_issues(reviewer_output, max_chars=1500)
+        if attempt >= 3:
+            previous_reviewer_feedback = (
+                f"⚠️ POKUS {attempt}/{max_attempts} — NEOPAKUJ stejný přístup.\n\n"
+                f"KONKRÉTNÍ PROBLÉMY:\n{extract_fail_issues(reviewer_output, max_chars=1000)}"
+            )
+        
+        if attempt < max_attempts:
+            wait = 5
+            print(f"⏳ Čekám {wait}s před retry...\n")
+            time.sleep(wait)
+    
+    return False, None
+
+
+def run_integrator_phase(
+    integrator, reviewer_task,
+    project_path: str, output_dir: str, current_task_name: str,
+    agents_map: dict, step_callback
+):
+    """FÁZE 3: Integrátor — spustí se jen po PASS od Reviewera."""
+    print("\n" + "=" * 60)
+    print("🔗 FÁZE 3: INTEGRÁTOR")
+    print("=" * 60 + "\n")
+    
+    integrator_task = create_integrator_task(
+        integrator, project_path, output_dir, current_task_name, reviewer_task
+    )
+    crew_integrator = Crew(
+        agents=[integrator], tasks=[integrator_task],
+        verbose=True, process=Process.sequential,
+        step_callback=step_callback,
+    )
+    
+    try:
+        crew_integrator.kickoff()
+    except Exception as e:
+        error_message = f"❌ Integrátor selhal: {str(e)[:500]}"
+        print(error_message)
+        send_telegram_message(error_message)
+        raise
+    
+    save_usage(agents_map)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -753,188 +996,37 @@ def _main_body():
         send_telegram_message(start_msg)
         print(start_msg)
 
-        # ── PHASE 1: ARCHITECT (runs once) ─────────────────────────────────────
-        print("=" * 60)
-        print("📐 FÁZE 1: ARCHITEKT")
-        print("=" * 60 + "\n")
-        
-        architect_task = create_architect_task(architect, project_path, output_dir, current_task_name)
-        
-        crew_architect = Crew(
-            agents=[architect],
-            tasks=[architect_task],
-            verbose=True,
-            process=Process.sequential,
-            step_callback=_step_callback,
-        )
-        
+        # FÁZE 1: Archiglict
         try:
-            crew_architect.kickoff()
-        except Exception as e:
-            error_message = f"❌ Architekt selhal: {str(e)[:500]}"
-            print(error_message)
-            send_telegram_message(error_message)
-            sys.exit(1)
-        
-        save_usage(agents_map)
+            architect_task = run_architect_phase(
+                architect, project_path, output_dir, current_task_name,
+                agents_map, _step_callback
+            )
+        except Exception:
+            return
 
-        # ── PHASE 2: CODER + REVIEWER LOOP (retry until PASS) ───────────────────
-        max_attempts = 5
-        reviewer_passed = False
-        previous_reviewer_feedback = ""
-        
-        for attempt in range(1, max_attempts + 1):
-            print("\n" + "=" * 60)
-            print(f"🔄 FÁZE 2: KODÉR + REVIEWER (pokus {attempt}/{max_attempts})")
-            print("=" * 60 + "\n")
-            
-            # Pass previous reviewer feedback to coder on retry
-            coder_task = create_coder_task(coder, project_path, output_dir, current_task_name, architect_task, previous_reviewer_feedback)
-            
-            # 2a: Kodér pracuje samostatně
-            crew_coder = Crew(
-                agents=[coder],
-                tasks=[coder_task],
-                verbose=True,
-                process=Process.sequential,
-                step_callback=_step_callback,
-            )
-            
-            try:
-                crew_coder.kickoff()
-            except Exception as e:
-                error_str = str(e)
-                is_transient = (
-                    "429" in error_str or "rate_limit" in error_str
-                    or "timeout" in error_str.lower()
-                    or "connection" in error_str.lower()
-                    or "503" in error_str or "502" in error_str
-                    or "UNAVAILABLE" in error_str
-                    or "None or empty" in error_str
-                )
-                
-                if is_transient and attempt < max_attempts:
-                    wait = min(10 * attempt, 60)
-                    print(f"▶ Přechodná chyba, čekám {wait}s...")
-                    time.sleep(wait)
-                    continue
-                else:
-                    error_message = f"❌ Fatální chyba (Kodér): {error_str[:500]}"
-                    print(error_message)
-                    send_telegram_message(error_message)
-                    sys.exit(1)
-            
-            save_usage(agents_map)
-            
-            # 2b: Reviewer pracuje samostatně — čte soubory z disku, ne z context
-            reviewer_task = create_reviewer_task(reviewer, project_path, output_dir, current_task_name)
-            
-            crew_reviewer = Crew(
-                agents=[reviewer],
-                tasks=[reviewer_task],
-                verbose=True,
-                process=Process.sequential,
-                step_callback=_step_callback,
-            )
-            
-            try:
-                crew_reviewer.kickoff()
-            except Exception as e:
-                error_str = str(e)
-                is_transient = (
-                    "429" in error_str or "rate_limit" in error_str
-                    or "timeout" in error_str.lower()
-                    or "connection" in error_str.lower()
-                    or "503" in error_str or "502" in error_str
-                    or "UNAVAILABLE" in error_str
-                    or "None or empty" in error_str
-                )
-                
-                if is_transient and attempt < max_attempts:
-                    wait = min(10 * attempt, 60)
-                    print(f"▶ Přechodná chyba, čekám {wait}s...")
-                    time.sleep(wait)
-                    continue
-                else:
-                    error_message = f"❌ Fatální chyba (Reviewer): {error_str[:500]}"
-                    print(error_message)
-                    send_telegram_message(error_message)
-                    sys.exit(1)
-            
-            save_usage(agents_map)
-            
-            # Check reviewer verdict
-            reviewer_output = ""
-            if reviewer_task.output:
-                reviewer_output = str(reviewer_task.output)
-            
-            is_pass, reason = check_reviewer_verdict(reviewer_output, current_task_name)
-            
-            if is_pass:
-                print(f"\n✅ Reviewer: PASS - {reason}")
-                reviewer_passed = True
-                break
-            else:
-                print(f"\n⚠️  Reviewer: FAIL - {reason}")
-                print(f"   Pokus {attempt}/{max_attempts}")
-                
-                # Store reviewer feedback for next retry (extracted and condensed)
-                previous_reviewer_feedback = extract_fail_issues(reviewer_output, max_chars=1500)
-                
-                # Na 3+ pokusu přidej eskalační instrukci
-                if attempt >= 3:
-                    previous_reviewer_feedback = (
-                        f"⚠️ POKUS {attempt}/{max_attempts} — předchozí pokusy selhaly na STEJNÉM problému.\n"
-                        f"NEOPAKUJ stejný přístup. Použij ZÁSADNĚ JINÝ způsob řešení.\n"
-                        f"Pokud je soubor příliš velký, rozděl ho na víc souborů.\n"
-                        f"Pokud chybí import, přidej ho. Pokud je špatná logika, přepiš ji.\n\n"
-                        f"KONKRÉTNÍ PROBLÉMY K OPRAVĚ:\n"
-                        f"{extract_fail_issues(reviewer_output, max_chars=1000)}"
-                    )
-                
-                if attempt < max_attempts:
-                    wait = 5
-                    print(f"⏳ Čekám {wait}s před retry...\n")
-                    time.sleep(wait)
-                else:
-                    message = (
-                        f"✕ Task FAILED po {max_attempts} pokusech: {current_task_name}\n"
-                        f" › Vrácen Kodérovi — prosím, zkontroluj manuálně.\n"
-                        f" › Oprav a spusť supervisor znovu."
-                    )
-                    send_telegram_message(message)
-                    print(message)
-                    return  # Exit - manual intervention needed
-        
-        if not reviewer_passed:
-            return  # Exit - already sent failure message
-        
-        # ── PHASE 3: INTEGRATOR (runs only after PASS) ───────────────────────────
-        print("\n" + "=" * 60)
-        print("🔗 FÁZE 3: INTEGRÁTOR")
-        print("=" * 60 + "\n")
-        
-        integrator_task = create_integrator_task(integrator, project_path, output_dir, current_task_name, reviewer_task)
-        
-        crew_integrator = Crew(
-            agents=[integrator],
-            tasks=[integrator_task],
-            verbose=True,
-            process=Process.sequential,
-            step_callback=_step_callback,
+        # FÁZE 2: Kodér + Reviewer
+        passed, reviewer_task = run_code_review_phase(
+            coder, reviewer, architect_task,
+            project_path, output_dir, current_task_name,
+            agents_map, _step_callback, max_attempts=5,
         )
         
+        if not passed:
+            send_telegram_message(f"✕ Task FAILED: {current_task_name}")
+            return
+        
+        # FÁZE 3: Integrátor
         try:
-            crew_integrator.kickoff()
-        except Exception as e:
-            error_message = f"❌ Integrátor selhal: {str(e)[:500]}"
-            print(error_message)
-            send_telegram_message(error_message)
-            sys.exit(1)
+            run_integrator_phase(
+                integrator, reviewer_task,
+                project_path, output_dir, current_task_name,
+                agents_map, _step_callback,
+            )
+        except Exception:
+            return
         
-        save_usage(agents_map)
-        
-        # ── SUCCESS: Advance progress ───────────────────────────────────────────
+        # SUCCESS: Advance progress
         print("\n" + "=" * 60)
         print("✅ HOTOVO!")
         print("=" * 60 + "\n")
