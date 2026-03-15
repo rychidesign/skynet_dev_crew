@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Freelance Runner</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Host+Grotesk:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        background: #000;
+        font-family: 'Host Grotesk', sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+    <script type="module">
+      import { BootScene } from './src/scenes/BootScene.js';
+      import { MenuScene } from './src/scenes/MenuScene.js';
+      import { GameScene } from './src/scenes/GameScene.js';
+      import { HUDScene } from './src/scenes/HUDScene.js';
+      import { LevelTransitionScene } from './src/scenes/LevelTransitionScene.js';
+      import { GameOverScene } from './src/scenes/GameOverScene.js';
+
+      const config = {
+        type: Phaser.AUTO,
+        width: 800,
+        height: 400,
+        pixelArt: true,
+        physics: {
+          default: 'arcade',
+          arcade: {
+            gravity: { y: 900 },
+            debug: false
+          }
+        },
+        scene: [
+          BootScene,
+          MenuScene,
+          GameScene,
+          HUDScene,
+          LevelTransitionScene,
+          GameOverScene
+        ]
+      };
+
+      new Phaser.Game(config);
+    </script>
+  </body>
+</html>

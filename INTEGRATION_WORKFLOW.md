@@ -1,62 +1,86 @@
-# Multiagent Integration Workflow – AKTUALIZOVÁNO 2025-03-11
+# Multiagent Integration Workflow – AKTUALIZOVÁNO 2025-03-14
 
 ## Historie změn
 
 | Datum | Verze | Změna |
 |-------|-------|-------|
+| 2025-03-14 | 3.0 | **3-fázové workflow**: Integrátor běží jen po PASS od Reviewera. Retry smyčka pro Kodér+Reviewer. Nové nástroje pro kontrolu délky souborů. |
 | 2025-03-11 | 2.0 | Přidán task grounding, validace výstupu, output sanity check, audit log |
 | Původní | 1.0 | Init: Retry loop, Supervisor-driven progress |
 
 ---
 
-## Problém: Reviewer reviewuje špatný task
+## ⚠️ PROBLÉM VYŘEŠEN (v3.0): Integrátor se spouštěl i po FAIL
 
-**Příklad chyby:** Task 2.4 (Generate images), ale Reviewer dal PASS pro Task 1.1 (HTML skeleton).
+**Původní problém:**
+- Všichni 4 agenti běželi sekvenčně: `Architekt → Kodér → Reviewer → Integrátor`
+- Integrátor se spustil i když Reviewer vrátil FAIL
+- Při retry se spustili všichni agenti znovu (neefektivní)
 
-**Důsledky:**
-- PROGRESS.md posunut na základě nevalidního review
-- Obrázky nikdy negenerovány
-- Dominový efekt chyb
+**Příklad chyby:**
+```
+Run 1: Architekt → Kodér → Reviewer (FAIL) → Integrátor (zbytečně spuštěn!)
+Retry: Architekt → Kodér → Reviewer → Integrátor (všichni znovu)
+```
 
-**Řešení (v2.0):**
-1. **Task grounding prefix** — každý task dostává explicitní "AKTUÁLNÍ TASK: X"
-2. **Validace výstupu** — Supervisor kontroluje, zda výstup obsahuje správný task ID
-3. **Output sanity check** — pro image tasky se ověřuje existence souborů
-
----
-
-## Problém: Integrátor se ukončí uprostřed práce
-
-**Příklad chyby:** Integrator Final Answer obsahuje jen "Action: list_dir" místo skutečné odpovědi.
-
-**Důsledky:**
-- Neúplný výstup
-- Chybějící finalizace
-
-**Řešení (v2.0):**
-- Graceful exit instrukce v Integrator backstory
-- max_iterations: 30 (dostatek pro dokončení práce)
+**Řešení (v3.0):**
+- **3-fázové workflow** místo lineárního
+- **Integrátor běží jen po PASS** od Reviewera
+- **Retry smyčka** jen pro Kodér+Reviewer (max 5 pokusů)
+- **Architekt běží jen jednou**
 
 ---
 
-## Architecture: Supervisor-Driven Progress Management
+## Architecture: 3-Phase Workflow (v3.0)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        SUPERVISOR                               │
-│ ┌────────────────────────────────────────────────────────────┐  │
-│ │ for attempt in range(1, max_attempts+1):                  │  │
-│ │   - Reads current task from PROGRESS.md (← CURRENT)       │  │
-│ │   - Creates fresh crew with task_grounding prefix         │  │
-│ │   - Executes: Architekt → Kodér → Reviewer → Integrátor  │  │
-│ │   - VALIDATES: reviewer output contains correct task ID   │  │
-│ │   - OUTPUT CHECK: verify expected files exist             │  │
-│ │   - PARSES verdict (PASS or FAIL)                        │  │
-│ │   - IF PASS:  advance_progress() → [x] & ← move          │  │
-│ │   - IF FAIL:  if attempt < max → retry else stop         │  │
-│ └────────────────────────────────────────────────────────────┘  │
+│                        SUPERVISOR (v3.0)                        │
+│                                                                 │
+│  ══════════════════════════════════════════════════════════    │
+│  FÁZE 1: ARCHITEKT (spustí se jednou)                          │
+│  ══════════════════════════════════════════════════════════    │
+│  - Čte PROGRESS.md, SPECS.md, rules/                           │
+│  - Vytvoří technický plán v output/plan.md                    │
+│  - Běží POUZE JEDNOU (ne při retry)                           │
+│                                                                 │
+│  ══════════════════════════════════════════════════════════    │
+│  FÁZE 2: KODÉR + REVIEWER (smyčka s retry)                    │
+│  ══════════════════════════════════════════════════════════    │
+│  for attempt in range(1, max_attempts+1):                     │
+│      Kodér → Implementuje podle plánu                         │
+│      Reviewer → Kontroluje kód                                │
+│      if PASS: break → pokračuj na FÁZE 3                      │
+│      if FAIL: retry (max 5 pokusů)                             │
+│                                                                 │
+│  ══════════════════════════════════════════════════════════    │
+│  FÁZE 3: INTEGRÁTOR (jen po PASS od Reviewera)                │
+│  ══════════════════════════════════════════════════════════    │
+│  - Sjednotí kód, aktualizuje importy                          │
+│  - Ověří konzistenci                                          │
+│  - Běží JEN KDYŽ Reviewer vrátil PASS                          │
+│                                                                 │
+│  ══════════════════════════════════════════════════════════    │
+│  SUCCESS: advance_progress() → [x] & ← move to next task      │
+│  ══════════════════════════════════════════════════════════    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Nové nástroje pro kontrolu délky souborů (v3.0)
+
+### FileSizeCheckTool
+Kontroluje délku jednotlivých souborů:
+- Backend soubory (.py, .go, .rs, .java, .rb, .php): **max 200 řádků**
+- Frontend soubory (.tsx, .ts, .jsx, .js, .vue, .svelte, .css): **max 150 řádků**
+
+### DirectorySizeCheckTool
+Kontroluje všechny soubory v adresáři najednou.
+
+### Integrace s agenty:
+- **Kodér**: Používá `file_size_check` PŘED odesláním kódu
+- **Reviewer**: Používá `directory_size_check` PŘED vydáním PASS
 
 ---
 
@@ -67,14 +91,15 @@
 - **Task:** Create detailed implementation plan
 - **Progress.md:** ❌ DO NOT TOUCH
 - **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
-- **On Retry:** Updates plan based on Reviewer's feedback
+- **On Retry:** NEBĚŽÍ ZNOVU - plán je už vytvořen
 
 ### 💻 Kodér
 - **Role:** Implement
 - **Task:** Write code according to plan
 - **Progress.md:** ❌ DO NOT TOUCH
 - **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
-- **On Retry:** Reads Reviewer's FAIL feedback and fixes issues
+- **On Retry:** Čte Reviewerův FAIL feedback a opravuje
+- **File Size:** MUSÍ použít `file_size_check` před odesláním
 
 ### 🔍 Reviewer
 - **Role:** QA / Security / Code Review
@@ -82,114 +107,155 @@
 - **Progress.md:** ❌ DO NOT TOUCH
 - **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
 - **Validace:** Supervisor ověřuje, že output obsahuje správný task ID
+- **File Size:** MUSÍ použít `directory_size_check` před PASS
 - **⚠️ IMPORTANT:** Must start output with **"PASS:"** or **"FAIL:"**
-- **⚠️ DELEGATION REMOVED:** Cannot delegate — return FAIL and Supervisor handles retry
 
 ### 🔗 Integrátor
 - **Role:** Assembly & Final Checks
 - **Task:** Update imports, routing, verify consistency
 - **Progress.md:** ❌ **ABSOLUTELY DO NOT TOUCH**
 - **Task grounding:** Dostává explicitní "AKTUÁLNÍ TASK: X"
-- **Graceful exit:** Musí dokončit VŠECHNY tool caily před finální odpovědí
+- **Graceful exit:** Musí dokončit VŠECHNY tool cally před finální odpovědí
+- **⚠️ NOVÉ:** Běží JEN PO PASS od Reviewera
 
 ### 👑 Supervisor
-- **Role:** Orchestrator + Retry Loop Manager
-- **Task:** Manage workflow, validate outputs, task state
+- **Role:** Orchestrator + Phase Manager
+- **Task:** Manage 3-phase workflow, validate outputs, task state
 - **Progress.md:** ✅ **ONLY SUPERVISOR MODIFIES IT**
 
 ---
 
-## Nové bezpečnostní mechanismy (v2.0)
-
-### 1. Task Grounding Prefix
-```
-══════════════════════════════════════════════════
-⚠️  AKTUÁLNÍ TASK: "Task 2.4: Generate hero + service images"
-Pracuješ POUZE na tomto tasku. Ignoruj ostatní.
-══════════════════════════════════════════════════
-```
-
-### 2. Reviewer Output Validation
-```python
-# Ověř, že Reviewer reviewoval SPRÁVNÝ task
-task_id_match = re.search(r"Task\s+(\d+\.\d+)", current_task_name)
-task_id = task_id_match.group(1) if task_id_match else current_task_name
-
-if task_id and task_id not in str(result):
-    print(f"⚠️ VALIDACE: Reviewer reviewoval špatný task!")
-    is_fail_verdict = True  # Vynutit retry
-```
-
-### 3. Output Sanity Check
-```python
-# Pro image tasky ověř, že soubory existují
-if "image" in task_name.lower() or "Generate" in task_name:
-    images_dir = os.path.join(output_dir, "public", "images")
-    if not os.path.exists(images_dir) or not os.listdir(images_dir):
-        is_fail_verdict = True  # Vynutit retry
-```
-
-### 4. Audit Log
-```python
-# Ulož strukturovaný záznam každého tasku
-audit_entry = {
-    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    "task": current_task_name,
-    "attempt": attempt,
-    "verdict": "FAIL" if is_fail_verdict else "PASS",
-    "output_files": sorted(os.listdir(output_dir)),
-}
-# → logs/tasks_audit.jsonl
-```
-
----
-
-## Retry Loop (max 5 attempts)
-
-```
-Run 1: Architekt → Kodér → Reviewer → Integrátor
-       ↓
-Supervisor validates: task ID present? files exist?
-       ↓
-If PASS: advance_progress() → next task
-If FAIL: retry (max 5 attempts)
-```
-
-**Na rozdíl od v1.0:**
-- Tasks se regenerují při každém retry (čerstvý os.listdir)
-- step_callback se předává i do retry crew
-- Output sanity check před advance_progress
-
----
-
-## Workflow Example: Task with Validation
+## Workflow Example: Task with Validation (v3.0)
 
 **Task 2.4: Generate hero + service images**
 
 ```
 Supervisor reads:  [ ] ← CURRENT Task 2.4: Generate hero + service images
 
-[TASK GROUNDING PREFIX APPLIED]
-
-Run 1:
+═══════════════════════════════════════════════════════════════
+FÁZE 1: ARCHITEKT (spustí se jednou)
+═══════════════════════════════════════════════════════════════
   Architekt → Plan (image generation prompts)
-  Kodér → Calls image_generator tool
-  Reviewer → FAIL: "Images not generated - no output directory"
-  Integrátor → (not called due to FAIL)
+  → Uloženo do output/plan.md
 
-Supervisor validates:
-  ✓ Task ID "2.4" found in output? ❌ NO (Reviewer mentioned Task 1.1!)
-  → VALIDATION FAIL → is_fail_verdict = True
+═══════════════════════════════════════════════════════════════
+FÁZE 2: KODÉR + REVIEWER (smyčka s retry)
+═══════════════════════════════════════════════════════════════
 
-Retry 2:
-  [FRESH TASKS REGENERATED]
-  Kodér → Generates images, saves to output/public/images/
-  Reviewer → PASS
-  Integrátor → Verifies files exist
+  Pokus 1:
+    Kodér → Calls image_generator tool
+    Reviewer → FAIL: "Images not generated - no output directory"
+    → Retry (čeká 5s)
 
-Supervisor output check:
-  ✓ images/public/ exists with files? YES
-  → advance_progress() → Task 2.4 marked [x]
+  Pokus 2:
+    [FRESH TASKS REGENERATED]
+    Kodér → Generates images, saves to output/public/images/
+    Reviewer → PASS: "All files created, sizes OK"
+    → Konec smyčky
+
+═══════════════════════════════════════════════════════════════
+FÁZE 3: INTEGRÁTOR (jen po PASS)
+═══════════════════════════════════════════════════════════════
+  Integrátor → Verifies files exist, checks imports
+  → "OK"
+
+═══════════════════════════════════════════════════════════════
+SUCCESS: advance_progress()
+═══════════════════════════════════════════════════════════════
+  Task 2.4 marked [x]
+  ← CURRENT moved to Task 2.5
+```
+
+---
+
+## Retry Loop (max 5 attempts)
+
+**Pouze FÁZE 2 (Kodér+Reviewer) se opakuje:**
+
+```
+FÁZE 1: Architekt → jednou
+FÁZE 2: Kodér → Reviewer → [PASS → FÁZE 3 | FAIL → retry]
+FÁZE 3: Integrátor → jednou (jen po PASS)
+```
+
+**Na rozdíl od v2.0:**
+- Architekt neběží při retry (úspora tokenů)
+- Integrátor neběží po FAIL (úspora tokenů)
+- Retry smyčka jen pro Kodér+Reviewer
+
+---
+
+## Nové bezpečnostní mechanismy (v3.0)
+
+### 1. File Size Limits
+```python
+# Backend: max 200 lines
+# Frontend: max 150 lines
+
+# Kodér MUSÍ použít file_size_check před odesláním
+# Reviewer MUSÍ použít directory_size_check před PASS
+```
+
+### 2. 3-Phase Workflow
+```python
+# FÁZE 1: Architekt (jednou)
+architect_task = create_architect_task(...)
+crew_architect.kickoff()
+
+# FÁZE 2: Kodér + Reviewer (smyčka)
+for attempt in range(1, max_attempts + 1):
+    coder_task = create_coder_task(...)
+    reviewer_task = create_reviewer_task(...)
+    crew_code_review.kickoff()
+    
+    is_pass, reason = check_reviewer_verdict(reviewer_output, task_name)
+    if is_pass:
+        break
+
+# FÁZE 3: Integrátor (jen po PASS)
+if reviewer_passed:
+    integrator_task = create_integrator_task(...)
+    crew_integrator.kickoff()
+```
+
+### 3. Reviewer Verdict Check
+```python
+def check_reviewer_verdict(reviewer_output: str, current_task_name: str) -> tuple[bool, str]:
+    """Check if reviewer output contains PASS or FAIL for the correct task."""
+    if "FAIL" in reviewer_output.upper():
+        return False, "Reviewer returned FAIL"
+    if "PASS" in reviewer_output.upper():
+        return True, "Reviewer returned PASS"
+    return False, "Reviewer output does not contain PASS or FAIL"
+```
+
+---
+
+## Related Code
+
+| Soubor | Popis |
+|--------|-------|
+| `supervisor.py` | 3-phase workflow, retry loop, validation (lines ~350-852) |
+| `agents/coder.py` | File size check tool integration |
+| `agents/reviewer.py` | Directory size check tool integration |
+| `tools/file_size_check.py` | FileSizeCheckTool + DirectorySizeCheckTool |
+| `projects/*/rules/do-not.md` | File Size Limits (CRITICAL) |
+| `projects/*/rules/general.md` | File Size section |
+
+---
+
+## Konfigurace (models.py)
+
+```python
+AGENT_MODELS = {
+    "architect":   "gemini-3.1-pro",
+    "coder":       "gpt-5.1-codex-mini",
+    "reviewer":    "minimax-m2.5",
+    "integrator":  "kimi-k2.5",
+}
+
+# Retry config
+max_attempts = 5  # Max retry pro Kodér+Reviewer smyčku
 ```
 
 ---
@@ -200,62 +266,40 @@ Supervisor output check:
 - **Output format:** Start with **"PASS:"** or **"FAIL:"** (case-insensitive)
 - **Task grounding:** Your prompt explicitly states which task to review
 - **Validation:** Supervisor will reject if your output doesn't contain the correct task ID
+- **File size:** MUST use `directory_size_check` before issuing PASS
 - **Delegation:** REMOVED — return FAIL and Supervisor handles retry
 
 ### For Coder Agent
 - **On Retry:** You will see fresh output directory listing
 - **Image generation:** Use `image_generator` tool for image tasks
+- **File size:** MUST use `file_size_check` before submitting
 - **Verify output:** Always check that files were created
 
 ### For Integrator Agent
 - **Graceful exit:** Complete ALL tool calls before returning final answer
 - **Final output:** Must be "OK" or "PROBLÉMY:" + list
 - **Never exit mid-tool-call**
+- **NEW:** Only runs after PASS from Reviewer
 
 ### For Supervisor
+- **Phase management:**
+  ```python
+  # Phase 1: Architect (once)
+  # Phase 2: Coder + Reviewer (loop until PASS)
+  # Phase 3: Integrator (only after PASS)
+  ```
 - **Validation flow:**
   ```python
-  result = crew.kickoff()
-  result_text = str(result).upper()
-  is_fail_verdict = "FAIL" in result_text
-
-  # 1. Validate task ID
-  if task_id not in result_text:
-      is_fail_verdict = True  # Force retry
-
-  # 2. Output sanity check
-  if "image" in task_name and not images_exist:
-      is_fail_verdict = True  # Force retry
-
-  # 3. Advance or retry
-  if not is_fail_verdict:
+  is_pass, reason = check_reviewer_verdict(reviewer_output, task_name)
+  if is_pass:
+      # Run Integrator
+      run_integrator()
       advance_progress()
+  else:
+      # Retry Coder + Reviewer
+      if attempt < max_attempts:
+          continue
+      else:
+          # Give up
+          send_failure_message()
   ```
-
----
-
-## Related Code
-
-| Soubor | Popis |
-|--------|-------|
-| `supervisor.py` | Main loop, task grounding, validation, retry (lines ~350-840) |
-| `agents/reviewer.py` | Verdict format |
-| `agents/integrator.py` | Graceful exit instructions |
-| `agents/coder.py` | Image generator tool |
-| `logs/tasks_audit.jsonl` | Audit log (v2.0+) |
-
----
-
-## Konfigurace (models.py)
-
-```python
-AGENT_MODELS = {
-    "architect":   "gemini-3.1-pro",
-    "coder":       "gpt-5.1-codex-mini",
-    "reviewer":    "minimax-m2.5",  # ← ZMĚNA z glm-5
-    "integrator":  "kimi-k2.5",
-}
-
-# Retry config
-max_attempts = 5  # ↑ ZMĚNA z 3
-```

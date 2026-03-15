@@ -1,0 +1,64 @@
+# A string used to distinguish your Supabase project
+# This is used in the database connection string
+project_id = "brandlens"
+
+[api]
+# Port to use for the API URL
+port = 54321
+# Schemas to expose in your API
+schemas = ["public", "graphql_public"]
+# Extra schemas to add to the search_path of every request
+extra_search_path = ["public", "extensions"]
+# The maximum number of rows returns from a view, table, or stored procedure
+max_rows = 1000
+
+[db]
+# Port to use for the local database URL
+port = 54322
+# Port used by db diff to scan the database schema
+# The database name is derived from project_id
+
+[studio]
+# Port to use for Supabase Studio
+port = 54323
+
+[inbucket]
+# Port to use for the email testing server web interface
+port = 54324
+smtp_port = 54325
+pop3_port = 54326
+
+[storage]
+# The maximum file size allowed for uploads (e.g. "5MB", "500KB")
+file_size_limit = "50MiB"
+
+[auth]
+# The base URL of your website. Used as an allow-list for redirects
+site_url = "http://localhost:3000"
+# A list of URLs that are allowed to be redirected to
+additional_redirect_urls = ["http://localhost:3000/**"]
+# How long tokens are valid for
+jwt_expiry = 3600
+# If disabled, the refresh token will never expire
+enable_refresh_token_rotation = true
+# Allows refresh tokens to be reused after expiry
+enable_signup = true
+enable_confirmations = false
+
+[auth.email]
+# Allow email authentication
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = false
+
+[auth.external.google]
+enabled = true
+client_id = "env(SUPABASE_AUTH_GOOGLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_GOOGLE_SECRET)"
+redirect_uri = "http://localhost:54321/auth/v1/callback"
+
+[edge_runtime]
+enabled = true
+
+[analytics]
+enabled = false

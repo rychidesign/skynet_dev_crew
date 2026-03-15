@@ -1,6 +1,26 @@
 # Bezpečné spuštění Supervisoru & Monitoru
 
-## 🚀 Supervisor
+## 🚀 Supervisor (v3.0)
+
+### Nové 3-fázové workflow
+
+Supervisor nyní používá **3-fázové workflow** místo lineárního:
+
+```
+FÁZE 1: ARCHITEKT (spustí se jednou)
+    ↓
+FÁZE 2: KODÉR + REVIEWER (smyčka s retry, max 5 pokusů)
+    ↓
+    ├─ PASS → pokračuj na FÁZE 3
+    └─ FAIL → retry nebo ukonči
+    ↓
+FÁZE 3: INTEGRÁTOR (jen po PASS od Reviewera)
+```
+
+**Výhody:**
+- Architekt neběží při retry (úspora tokenů)
+- Integrátor neběží po FAIL (úspora tokenů)
+- Retry smyčka jen pro Kodér+Reviewer
 
 ### Pravidlo: MAX 1 instance najednou
 
@@ -225,4 +245,37 @@ python3 supervisor.py taskmanager
 | `ModuleNotFoundError: crewai` | Venv není aktivován | `source venv/bin/activate` |
 | `Invalid response from LLM` | Rate limit | Čekej 5 minut a zkus znovu |
 | Monitor se nespustí | Log file neexistuje | `mkdir -p logs && touch logs/taskmanager.log` |
+| Integrátor běží po FAIL | Stará verze supervisoru | Aktualizuj na v3.0+ |
 
+---
+
+## 🆕 Nové funkce v3.0
+
+### File Size Limits
+
+Kodér a Reviewer nyní kontrolují délku souborů:
+
+```python
+# Backend: max 200 lines
+# Frontend: max 150 lines
+
+# Nástroje:
+# - file_size_check: kontrola jednotlivých souborů
+# - directory_size_check: kontrola všech souborů v adresáři
+```
+
+### 3-Phase Workflow
+
+```python
+# FÁZE 1: Architekt (jednou)
+# FÁZE 2: Kodér + Reviewer (smyčka s retry)
+# FÁZE 3: Integrátor (jen po PASS)
+```
+
+### Retry Logic
+
+```python
+# Retry smyčka jen pro Kodér+Reviewer
+# Architekt neběží při retry
+# Integrátor neběží po FAIL
+```

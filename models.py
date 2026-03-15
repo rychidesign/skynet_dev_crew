@@ -15,11 +15,13 @@ PROVIDER NOTES:
 - OpenCode Go: separate endpoint from Zen! Go = /zen/go/v1, Zen = /zen/v1.
   GLM-5 and Kimi K2.5 use OpenAI-compatible API (/chat/completions).
   MiniMax M2.5 uses Anthropic-compatible API (/messages).
+- OpenCode Zen: pay-as-you-go endpoint at /zen/v1.
+  Gemini 3 Flash, GPT-5.2-Codex, Claude Haiku 4.5 available here.
 """
 
 import os
-from crewai import LLM
 
+from crewai import LLM
 
 # ---------------------------------------------------------------------------
 # Provider configuration
@@ -53,6 +55,19 @@ PROVIDERS = {
         "base_url": "https://opencode.ai/zen/go/v1",
         "prefix": "anthropic",
     },
+    # OpenCode Zen — pay-as-you-go, more models available
+    # Gemini 3 Flash, GPT-5.2-Codex, Claude Haiku 4.5
+    "opencode_zen": {
+        "api_key_env": "OPENCODE_API_KEY",
+        "base_url": "https://opencode.ai/zen/v1",
+        "prefix": "openai",
+    },
+    # OpenCode Zen — Anthropic-compatible models
+    "opencode_zen_anthropic": {
+        "api_key_env": "OPENCODE_API_KEY",
+        "base_url": "https://opencode.ai/zen/v1",
+        "prefix": "anthropic",
+    },
 }
 
 
@@ -70,6 +85,14 @@ MODELS = {
         "ctx": 1_000_000,
         "note": "3-tier thinking, 1M ctx, best for architecture",
     },
+    "gemini-3-flash": {
+        "provider": "google_direct",
+        "model_id": "gemini-3-flash-preview",
+        "input_price": 0.10,
+        "output_price": 0.40,
+        "ctx": 1_000_000,
+        "note": "Gemini 3 Flash via Google direct, fast and capable",
+    },
     "gemini-2.5-flash": {
         "provider": "google_direct",
         "model_id": "gemini-2.5-flash",
@@ -78,7 +101,6 @@ MODELS = {
         "ctx": 1_000_000,
         "note": "Fast and cheap, good for simple tasks",
     },
-
     # === Anthropic (direct) ===
     "claude-sonnet-4.6": {
         "provider": "anthropic_direct",
@@ -88,7 +110,6 @@ MODELS = {
         "ctx": 200_000,
         "note": "Extended thinking, cross-vendor review",
     },
-
     # === OpenAI via Vercel ===
     "gpt-5.1-codex-mini": {
         "provider": "vercel",
@@ -98,7 +119,6 @@ MODELS = {
         "ctx": 400_000,
         "note": "Codex-optimized, 83.6% LiveCodeBench",
     },
-
     # === OpenCode Go ($10/mo subscription) ===
     "glm-5": {
         "provider": "opencode_go",
@@ -124,6 +144,23 @@ MODELS = {
         "ctx": 256_000,
         "note": "MiniMax, Anthropic API, Go subscription",
     },
+    # === OpenCode Zen (pay-as-you-go) ===
+    "gpt-5.2-codex": {
+        "provider": "opencode_zen",
+        "model_id": "gpt-5.2-codex",
+        "input_price": 0.50,
+        "output_price": 4.0,
+        "ctx": 400_000,
+        "note": "GPT-5.2 Codex via OpenCode Zen, advanced coding",
+    },
+    "claude-haiku-4.5": {
+        "provider": "opencode_zen_anthropic",
+        "model_id": "claude-haiku-4-5",
+        "input_price": 0.80,
+        "output_price": 4.0,
+        "ctx": 200_000,
+        "note": "Claude Haiku 4.5 via OpenCode Zen, fast and smart",
+    },
 }
 
 
@@ -132,25 +169,26 @@ MODELS = {
 # ---------------------------------------------------------------------------
 
 AGENT_MODELS = {
-    "architect":   "gemini-3.1-pro",
-    "coder":       "gemini-3.1-pro",
-    "reviewer":    "kimi-k2.5",
-    "integrator":  "kimi-k2.5",
-    "junior":      "gemini-2.5-flash",
+    "architect": "claude-sonnet-4.6",
+    "coder": "gemini-3-flash",
+    "reviewer": "claude-sonnet-4.6",
+    "integrator": "gemini-3-flash",
+    "junior": "gemini-2.5-flash",
 }
 
 AGENT_MAX_TOKENS = {
-    "architect":   4096,
-    "coder":       8192,
-    "reviewer":    16000,   # extended thinking needs more
-    "integrator":  16384,
-    "junior":      4096,
+    "architect": 4096,
+    "coder": 8192,
+    "reviewer": 16000,  # extended thinking needs more
+    "integrator": 16384,
+    "junior": 4096,
 }
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
 
 def get_llm(agent_name: str) -> LLM:
     """Return a configured LLM object for the given agent."""
@@ -160,9 +198,7 @@ def get_llm(agent_name: str) -> LLM:
 
     api_key = os.getenv(provider_cfg["api_key_env"])
     if not api_key:
-        raise ValueError(
-            f"Missing API key: set {provider_cfg['api_key_env']} in .env"
-        )
+        raise ValueError(f"Missing API key: set {provider_cfg['api_key_env']} in .env")
 
     model_string = f"{provider_cfg['prefix']}/{model_cfg['model_id']}"
     max_tokens = AGENT_MAX_TOKENS.get(agent_name, 4096)
@@ -184,7 +220,11 @@ def get_model_pricing() -> dict:
     for key, cfg in MODELS.items():
         provider_cfg = PROVIDERS[cfg["provider"]]
         full_id = f"{provider_cfg['prefix']}/{cfg['model_id']}"
-        bare_id = cfg["model_id"].split("/")[-1] if "/" in cfg["model_id"] else cfg["model_id"]
+        bare_id = (
+            cfg["model_id"].split("/")[-1]
+            if "/" in cfg["model_id"]
+            else cfg["model_id"]
+        )
         price = {"input": cfg["input_price"], "output": cfg["output_price"]}
         pricing[full_id] = price
         pricing[bare_id] = price
@@ -202,7 +242,7 @@ def print_catalog():
         provider_cfg = PROVIDERS[cfg["provider"]]
         full_id = f"{provider_cfg['prefix']}/{cfg['model_id']}"
         price = (
-            f"${cfg['input_price']}/{cfg['output_price']}"
+            f"${cfg['input_price']}/${cfg['output_price']}"
             if cfg["input_price"] > 0
             else "Go subscription"
         )

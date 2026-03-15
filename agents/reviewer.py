@@ -6,6 +6,7 @@ from tools.list_dir import create_list_dir
 from tools.find_files import create_find_files
 from tools.search_content import create_search_content
 from tools.lint_check import create_lint_check
+from tools.file_size_check import create_file_size_check, create_directory_size_check
 
 
 def create_reviewer_agent(project_path: str, output_path: str = ""):
@@ -31,6 +32,7 @@ def create_reviewer_agent(project_path: str, output_path: str = ""):
 - Functionality — complete implementation, correct imports, logic errors
 - Performance — unnecessary complexity, inefficient operations
 - Conventions — compliance with coding standards defined in rules/
+- File Size — files must not exceed line limits (200 for backend, 150 for frontend)
 
 Adapt your review to the project's tech stack. Read SPECS.md and rules/
 to know what to check. Do not check React hooks in an HTML project.
@@ -41,6 +43,16 @@ You review code systematically:
 2. Functionality — is the implementation complete and matches the Architect's plan?
 3. Performance — are there obvious performance problems?
 4. Conventions — does it follow coding standards from rules?
+5. File Size — use directory_size_check to verify all files are within limits
+
+CRITICAL: Before issuing PASS verdict, you MUST:
+1. Use directory_size_check to verify no file exceeds line limits
+2. Use lint_check to verify code compiles without errors
+3. Verify all files mentioned in the Architect's plan exist
+
+If ANY file exceeds the line limit (200 for backend, 150 for frontend):
+- Return FAIL with the specific file and line count
+- Require the Coder to split the file before proceeding
 
 Your output is ALWAYS a structured review:
 
@@ -68,6 +80,8 @@ Code output directory: {code_base}""",
             create_find_files(code_base),
             create_search_content(code_base),
             create_lint_check(code_base),
+            create_file_size_check(code_base),
+            create_directory_size_check(code_base),
         ],
         max_iterations=15,
         max_execution_time=1800,

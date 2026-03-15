@@ -1,0 +1,16 @@
+---
+description: DO NOT rules for Freelance Runner
+globs: ["**/*.js", "**/*.html"]
+---
+
+# DO NOT
+
+- DO NOT use `var`
+- DO NOT put game logic in Scene files — use managers
+- DO NOT use magic numbers — use constants.js
+- DO NOT access another scene's properties directly — use this.game.events
+- DO NOT hardcode canvas dimensions — use this.scale.width / this.scale.height
+- DO NOT load external image assets — generate all textures procedurally in BootScene
+- DO NOT call sprite.destroy() on pooled objects — use setActive(false) instead
+- DO NOT use setInterval/setTimeout — use this.time.addEvent()
+- DO NOT edit PROGRESS.md

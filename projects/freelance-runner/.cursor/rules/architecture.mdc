@@ -1,0 +1,14 @@
+---
+description: Architecture rules for Freelance Runner (Phaser 3)
+globs: ["**/*.js"]
+---
+
+# Architecture
+
+- Scenes: Phaser lifecycle only (create/update/shutdown) — no game logic
+- All game logic in src/managers/ classes
+- Scene-to-scene communication via `this.game.events` emitter only
+- HUDScene runs parallel to GameScene via `scene.launch()`, reacts to events only
+- Single `gameState` object on `this.game`, passed by reference to all managers
+- Player.js handles sprite, physics, jump — never score or spawn logic
+- All textures generated procedurally in BootScene — no external image assets
