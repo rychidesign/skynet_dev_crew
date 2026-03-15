@@ -22,6 +22,7 @@ from agents.coder import create_coder_agent
 from agents.reviewer import create_reviewer_agent
 from agents.integrator import create_integrator_agent
 from tools.telegram_notify import send_telegram_message, setup_telegram_listener
+from guardrails import validate_reviewer_verdict_format, validate_reviewer_mentions_tools
 
 
 load_dotenv()
@@ -491,69 +492,6 @@ Pravidla pro file_writer:
     )
 
 
-def validate_reviewer_output(result) -> Tuple[bool, Any]:
-    """CrewAI Task Guardrail: ověří formát PASS/FAIL a použití nástrojů.
-    
-    Vrací (True, output) pokud vše OK.
-    Vrací (False, chybová zpráva) pokud je problém — CrewAI donutí agenta opravit.
-    """
-    if not result or not getattr(result, 'raw', None):
-        return (False, "Výstup je prázdný. Musíš vrátit review začínající 'PASS:' nebo 'FAIL:'.")
-    
-    output_text = result.raw
-    
-    # 1. Ověř formát PASS/FAIL na prvním řádku
-    first_line = ""
-    for line in output_text.strip().splitlines():
-        stripped = line.strip()
-        if stripped:
-            first_line = stripped.upper()
-            break
-    
-    if not (first_line.startswith("PASS:") or first_line.startswith("PASS ") or
-            first_line.startswith("FAIL:") or first_line.startswith("FAIL ")):
-        return (
-            False,
-            "⚠️ Tvůj výstup MUSÍ začínat na prvním řádku slovem 'PASS:' nebo 'FAIL:' "
-            "následovaným názvem tasku. Oprav formát a vrať review znovu.\n"
-            f"Aktuální první řádek: '{first_line[:80]}'"
-        )
-    
-    # 2. Ověř evidence použití nástrojů
-    text_lower = output_text.lower()
-    
-    has_dir_evidence = any(indicator in text_lower for indicator in [
-        "list_dir", "directory listing", "soubory v", "files in",
-        "├──", "└──", "[dir]", "[file]",
-    ])
-    
-    has_size_evidence = any(indicator in text_lower for indicator in [
-        "size_check", "directory_size", "file_size",
-        "lines (max", "within size limits", "within limits",
-        "exceed", "řádků", "lines",
-    ])
-    
-    missing = []
-    if not has_dir_evidence:
-        missing.append("list_dir (musíš prozkoumat adresářovou strukturu)")
-    if not has_size_evidence:
-        missing.append("directory_size_check (musíš zkontrolovat velikosti souborů)")
-    
-    if missing:
-        return (
-            False,
-            "⚠️ Tvůj review NEOBSAHUJE důkazy o použití povinných nástrojů:\n"
-            + "\n".join(f"  - {m}" for m in missing) + "\n\n"
-            "POVINNÉ KROKY před vydáním verdiktu:\n"
-            "1. Použij list_dir na output adresář\n"
-            "2. Použij directory_size_check na output adresář\n"
-            "3. Přečti klíčové soubory pomocí file_reader\n"
-            "Pak vrať review znovu s výsledky těchto kontrol."
-        )
-    
-    return (True, output_text)
-
-
 def create_reviewer_task(reviewer, project_path: str, output_dir: str, current_task_name: str):
     """Create reviewer task - runs after coder."""
     progress_file_path = (
@@ -626,7 +564,10 @@ Příklad:
 """,
         agent=reviewer,
         expected_output=f"Strukturovaný code review pro '{current_task_name}' — výstup MUSÍ začínat 'PASS: Task X.X' nebo 'FAIL: Task X.X' následovaný popisem",
-        guardrail=validate_reviewer_output,
+        guardrails=[
+            validate_reviewer_verdict_format,
+            validate_reviewer_mentions_tools,
+        ],
         guardrail_max_retries=2,
     )
 
@@ -739,6 +680,41 @@ def _is_transient_error(e: Exception) -> bool:
     ])
 
 
+def log_retry_event(
+    event: str,
+    task_name: str,
+    attempt: int,
+    max_attempts: int,
+    details: dict | None = None,
+):
+    """Loguj retry událost ve structured formátu do konzole i JSONL souboru.
+    
+    Args:
+        event: Typ události (PASS, FAIL, ESCALATION, EMPTY_OUTPUT, EXHAUSTED)
+        task_name: Název aktuálního tasku
+        attempt: Číslo aktuálního pokusu
+        max_attempts: Maximum pokusů
+        details: Volitelné další detaily (dict)
+    """
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "event": event,
+        "task": task_name,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+    }
+    if details:
+        entry.update(details)
+    
+    log_line = json.dumps(entry, ensure_ascii=False)
+    print(f"[RETRY] {log_line}")
+    
+    retry_log_path = "logs/retry_events.jsonl"
+    os.makedirs(os.path.dirname(retry_log_path), exist_ok=True)
+    with open(retry_log_path, "a", encoding="utf-8") as f:
+        f.write(log_line + "\n")
+
+
 def run_architect_phase(
     architect, project_path: str, output_dir: str,
     current_task_name: str, agents_map: dict, step_callback
@@ -834,12 +810,23 @@ def run_code_review_phase(
         if reviewer_task.output:
             reviewer_output = str(reviewer_task.output)
         else:
+            # Detailní diagnostika pro prázdný output
             empty_msg = (
-                f"⚠️ Reviewer vrátil PRÁZDNÝ výstup (pokus {attempt}/{max_attempts}). "
-                f"Možné příčiny: max_iterations vyčerpán, LLM timeout, nebo guardrail selhání."
+                f"⚠️  VAROVÁNÍ: reviewer_task.output je None po crew_reviewer.kickoff()\n"
+                f"   Pokus: {attempt}/{max_attempts}\n"
+                f"   Task: {current_task_name}\n"
+                f"   Reviewer max_iter: {getattr(reviewer, 'max_iterations', '?')}\n"
+                f"   Reviewer max_time: {getattr(reviewer, 'max_execution_time', '?')}s\n"
+                f"   Guardrail max_retries: 2\n"
+                f"   Možné příčiny: max_iterations vyčerpán, LLM timeout, guardrail selhání"
             )
             print(empty_msg)
             send_telegram_message(empty_msg)
+            
+            log_retry_event("EMPTY_OUTPUT", current_task_name, attempt, max_attempts, {
+                "reviewer_max_iterations": getattr(reviewer, 'max_iterations', None),
+                "reviewer_max_execution_time": getattr(reviewer, 'max_execution_time', None),
+            })
             
             previous_reviewer_feedback = (
                 "Reviewer nebyl schopen dokončit review (prázdný výstup). "
@@ -851,18 +838,32 @@ def run_code_review_phase(
                 print(f"⏳ Čekám {wait}s před retry...\n")
                 time.sleep(wait)
                 continue
+            log_retry_event("EXHAUSTED", current_task_name, attempt, max_attempts, {
+                "reason": "empty_output_after_max_attempts",
+            })
             return False, None
         
         is_pass, reason = check_reviewer_verdict(reviewer_output, current_task_name)
         
         if is_pass:
             print(f"\n✅ Reviewer: PASS - {reason}")
+            log_retry_event("PASS", current_task_name, attempt, max_attempts, {
+                "reason": reason,
+                "reviewer_output_length": len(reviewer_output),
+            })
             return True, reviewer_task
         
         print(f"\n⚠️  Reviewer: FAIL - {reason} (pokus {attempt}/{max_attempts})")
+        log_retry_event("FAIL", current_task_name, attempt, max_attempts, {
+            "reason": reason,
+            "reviewer_output_length": len(reviewer_output),
+        })
         
         previous_reviewer_feedback = extract_fail_issues(reviewer_output, max_chars=1500)
         if attempt >= 3:
+            log_retry_event("ESCALATION", current_task_name, attempt, max_attempts, {
+                "feedback_length": len(previous_reviewer_feedback),
+            })
             previous_reviewer_feedback = (
                 f"⚠️ POKUS {attempt}/{max_attempts} — NEOPAKUJ stejný přístup.\n\n"
                 f"KONKRÉTNÍ PROBLÉMY:\n{extract_fail_issues(reviewer_output, max_chars=1000)}"
@@ -873,6 +874,9 @@ def run_code_review_phase(
             print(f"⏳ Čekám {wait}s před retry...\n")
             time.sleep(wait)
     
+    log_retry_event("EXHAUSTED", current_task_name, max_attempts, max_attempts, {
+        "message": f"Task selhal po {max_attempts} pokusech",
+    })
     return False, None
 
 
