@@ -1,6 +1,6 @@
 # Bezpečné spuštění Supervisoru & Monitoru
 
-## 🚀 Supervisor (v3.2)
+## 🚀 Supervisor (v3.2.1)
 
 ### Nové 3-fázové workflow
 
@@ -41,24 +41,42 @@ Kodér a Reviewer běží v **oddělených Crews**:
 
 ### 🆕 v3.2: Task Guardrails
 
-Reviewer má nyní **guardrail validaci**:
+Reviewer má nyní **guardrail validaci** pomocí separátního modulu `guardrails.py`:
 
 ```python
-# Reviewer task s guardrail
+from guardrails import validate_reviewer_verdict_format, validate_reviewer_mentions_tools
+
+# Reviewer task s guardrails (plural!)
 reviewer_task = Task(
     ...,
-    guardrail=validate_reviewer_output,
+    guardrails=[
+        validate_reviewer_verdict_format,   # 1. PASS/FAIL formát
+        validate_reviewer_mentions_tools,   # 2. evidence nástrojů
+    ],
     guardrail_max_retries=2,  # Max 2 interní retry
 )
 ```
 
-**Co guardrail kontroluje:**
-1. PASS/FAIL formát na prvním řádku
-2. Tool usage evidence (např. "Použil jsem directory_size_check")
+**Co guardrails kontrolují (sekvenčně):**
+
+1. **`validate_reviewer_verdict_format()`**
+   - Kontroluje PASS/FAIL na prvním řádku
+   - Ignoruje PASS/FAIL uvnitř textu review
+
+2. **`validate_reviewer_mentions_tools()`**
+   - Kontroluje evidence použití `list_dir`
+   - Kontroluje evidence použití `directory_size_check` / `file_size_check`
+   - Hledá indikátory jako: `├──`, `└──`, `files in`, `size_check`, `lines`, atd.
 
 **Pokud guardrail selže:**
 - Reviewer dostane až 2 interní retry pokusy
 - Po vyčerpání retry → FAIL a pokračuje se v hlavní retry smyčce
+
+**Strukturované logování:**
+Všechny retry události se logují do `logs/retry_events.jsonl`:
+```json
+{"timestamp":"2025-03-15T14:30:00","event":"FAIL","task":"Task 2.4","attempt":2,"max_attempts":5}
+```
 
 ---
 
@@ -97,13 +115,29 @@ Pokud Reviewer vrátí **prázdný výstup**:
 
 ```python
 if not reviewer_output or reviewer_output.strip() == "":
-    logger.error("Reviewer returned empty output!")
-    send_telegram_message("⚠️ EMPTY REVIEWER OUTPUT")
+    # Detailní diagnostika
+    empty_msg = (
+        f"⚠️  VAROVÁNÍ: reviewer_task.output je None\n"
+        f"   Pokus: {attempt}/{max_attempts}\n"
+        f"   Reviewer max_iter: {getattr(reviewer, 'max_iterations', '?')}\n"
+        f"   Reviewer max_time: {getattr(reviewer, 'max_execution_time', '?')}s\n"
+        f"   Guardrail max_retries: 2\n"
+    )
+    print(empty_msg)
+    send_telegram_message(empty_msg)
+    
+    # Strukturované JSONL logování
+    log_retry_event("EMPTY_OUTPUT", current_task_name, attempt, max_attempts, {
+        "reviewer_max_iterations": getattr(reviewer, 'max_iterations', None),
+        "reviewer_max_execution_time": getattr(reviewer, 'max_execution_time', None),
+    })
+    
     continue  # Retry
 ```
 
 **Notifikace:**
-- Log do souboru
+- Log do konzole
+- Log do `logs/retry_events.jsonl`
 - Telegram zpráva pro monitoring
 
 ### Pravidlo: MAX 1 instance najednou
@@ -334,29 +368,64 @@ python3 supervisor.py taskmanager
 | 🆕 `Empty reviewer output` | Reviewer neodpověděl | Log + Telegram notifikace, retry |
 | 🆕 `Escalation mode` | 3+ retry pokusy | Normální chování, Kodér dostane speciální instrukce |
 | 🆕 `Feedback truncated` | FAIL feedback > 1.5k znaků | Normální chování, zkráceno pro efektivitu |
+| 🆕 `logs/retry_events.jsonl` chybí | První spuštění | Vytvoří se automaticky při prvním retry |
+
+**Kde najít logy:**
+- `logs/retry_events.jsonl` — strukturované retry události (PASS, FAIL, ESCALATION, EMPTY_OUTPUT, EXHAUSTED)
+- `logs/usage.json` — token usage a cost tracking
+- `logs/<project>.log` — hlavní log projektu
 
 ---
 
 ## 🆕 Nové funkce v3.0 - v3.2
 
-### v3.2: Guardrails & Orchestration
+### v3.2.1: Guardrails Module & Structured Logging
 
 ```python
-# Task Guardrail pro Reviewer
+# guardrails.py - separátní modul
+from guardrails import validate_reviewer_verdict_format, validate_reviewer_mentions_tools
+
+# Reviewer task s plural guardrails=[]
 reviewer_task = Task(
-    guardrail=validate_reviewer_output,
+    guardrails=[
+        validate_reviewer_verdict_format,   # 1. PASS/FAIL formát
+        validate_reviewer_mentions_tools,   # 2. evidence nástrojů
+    ],
     guardrail_max_retries=2,
 )
 
+# Strukturované JSONL logování
+log_retry_event("FAIL", task_name, attempt, max_attempts, {
+    "reason": "Reviewer returned FAIL",
+    "reviewer_output_length": 1234,
+})
+# → logs/retry_events.jsonl
+```
+
+**5 typů událostí:**
+- `PASS` — Reviewer vrátí PASS
+- `FAIL` — Reviewer vrátí FAIL
+- `ESCALATION` — 3+ retry pokusy
+- `EMPTY_OUTPUT` — Reviewer vrátí prázdný výstup
+- `EXHAUSTED` — Vyčerpány všechny pokusy
+
+### v3.2: Guardrails & Orchestration
+
+```python
 # Extrahované orchestrace funkce
 run_architect_phase()      # FÁZE 1
 run_code_review_phase()    # FÁZE 2 (s retry loop)
 run_integrator_phase()     # FÁZE 3
 
-# Fallback pro empty output
+# Fallback pro empty output s detailní diagnostikou
 if not reviewer_output:
-    logger.error("Empty output")
-    send_telegram_message("⚠️ EMPTY REVIEWER OUTPUT")
+    empty_msg = (
+        f"⚠️  VAROVÁNÍ: reviewer_task.output je None\n"
+        f"   Reviewer max_iter: {getattr(reviewer, 'max_iterations', '?')}\n"
+        f"   Reviewer max_time: {getattr(reviewer, 'max_execution_time', '?')}s\n"
+    )
+    send_telegram_message(empty_msg)
+    log_retry_event("EMPTY_OUTPUT", ...)
 ```
 
 ### v3.1: Crew Separation & Feedback
@@ -405,4 +474,6 @@ Kodér a Reviewer nyní kontrolují délku souborů:
 # Integrátor neběží po FAIL
 # v3.1: FAIL feedback zkrácen na 1.5k znaků
 # v3.2: Guardrail max 2 interní retry pro Reviewer
+# v3.2.1: Guardrails v guardrails.py, plural guardrails=[]
+# v3.2.1: Strukturované JSONL logování (logs/retry_events.jsonl)
 ```
