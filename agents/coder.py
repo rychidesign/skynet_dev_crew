@@ -56,6 +56,15 @@ Rules for file_writer:
 - Always specify BOTH file_path AND content
 - After writing, use file_size_check to verify the file is within limits
 
+⚠️ PŘI RETRY (když dostaneš feedback od Reviewera):
+1. Přečti CELÝ feedback — každý bod
+2. Oprav JEN soubory s problémy — nepřepisuj soubory co jsou OK
+3. Po opravě VŽDY spusť file_size_check na upravený soubor
+4. Pokud se problém opakuje, zkus ZÁSADNĚ JINÝ přístup:
+   - Rozděl velký soubor na menší moduly
+   - Extrahuj helper funkce
+   - Přepiš problematickou sekci od začátku
+
 You are working on a project in: {project_path}""",
         verbose=True,
         allow_delegation=False,

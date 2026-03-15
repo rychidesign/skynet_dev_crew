@@ -125,6 +125,36 @@ def list_specs_files(project_path: str) -> str:
     return "\n".join(lines)
 
 
+def extract_fail_issues(reviewer_output: str, max_chars: int = 1500) -> str:
+    """Extrahuj jen strukturované problémy z reviewer outputu.
+    
+    Vrací zkrácený, čistý seznam issues místo celého raw outputu.
+    """
+    if not reviewer_output:
+        return "(žádný feedback)"
+    
+    lines = reviewer_output.strip().splitlines()
+    issues = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("-", "*", "•")) or (
+            len(stripped) > 1 and stripped[0].isdigit() and "." in stripped[:4]
+        ):
+            issues.append(stripped)
+    
+    if issues:
+        result = "\n".join(issues)
+        return result[:max_chars]
+    
+    upper = reviewer_output.upper()
+    fail_idx = upper.find("FAIL")
+    if fail_idx >= 0:
+        return reviewer_output[fail_idx:fail_idx + max_chars].strip()
+    
+    return reviewer_output[:max_chars].strip()
+
+
 USAGE_FILE = "logs/usage.json"
 
 from models import get_model_pricing
@@ -409,14 +439,18 @@ def create_coder_task(coder, project_path: str, output_dir: str, current_task_na
     retry_feedback = ""
     if previous_reviewer_feedback:
         retry_feedback = f"""
-══════════════════════════════════════════════════════════════════════════════
-⚠️  RETRY: Předchozí pokus selhal. Oprav následující problémy:
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════
+⚠️  RETRY — Předchozí pokus selhal. Oprav TYTO problémy:
+════════════════════════════════════════════════════════
 
 {previous_reviewer_feedback}
 
-⚠️  MUSÍŠ opravit VŠECHNY problémy uvedené výše. Jinak task opět selže.
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════
+INSTRUKCE:
+- Oprav KAŽDÝ bod výše
+- Po opravě VŽDY spusť file_size_check na každý upravený soubor
+- NEPIŠ znovu soubory které jsou v pořádku — oprav JEN problematické
+════════════════════════════════════════════════════════
 
 """
 
@@ -455,7 +489,7 @@ Pravidla pro file_writer:
     )
 
 
-def create_reviewer_task(reviewer, project_path: str, output_dir: str, current_task_name: str, coder_task):
+def create_reviewer_task(reviewer, project_path: str, output_dir: str, current_task_name: str):
     """Create reviewer task - runs after coder."""
     progress_file_path = (
         os.path.join(project_path, "PROGRESS.md")
@@ -482,6 +516,15 @@ def create_reviewer_task(reviewer, project_path: str, output_dir: str, current_t
     return Task(
         description=f"""{task_grounding}Zkontroluj kód od Kodéra pro task: {current_task_name}
 
+POVINNÉ KROKY (musíš provést VŠECHNY):
+1. Použij list_dir na "{output_dir}/" — podívej se jaké soubory existují
+2. Přečti plán: {output_dir}/plan.md pomocí file_reader
+3. Přečti KAŽDÝ nově vytvořený soubor v {output_dir}/ pomocí file_reader
+4. Použij directory_size_check na "{output_dir}/" — ověř limity velikostí
+5. Teprve POTOM vydej verdikt PASS nebo FAIL
+
+Pokud vynecháš jakýkoli krok, tvůj review je NEPLATNÝ.
+
 ⚠️  KRITICKÉ: Tvůj review MUSÍ obsahovat název tasku "{current_task_name}".
 Pokud reviewuješ jiný task, je to CHYBA.
 
@@ -494,8 +537,6 @@ PROGRESS.md:
 
 RULES:
 {rules_reviewer}
-
-Pro aktuální seznam souborů v {output_dir}/ použij nástroj list_dir.
 
 Tvoje úkoly:
 1. Přečti plán: {output_dir}/plan.md
@@ -520,7 +561,6 @@ Příklad:
 """,
         agent=reviewer,
         expected_output=f"Strukturovaný code review pro '{current_task_name}' — výstup MUSÍ začínat 'PASS: Task X.X' nebo 'FAIL: Task X.X' následovaný popisem",
-        context=[coder_task],
     )
 
 
@@ -586,7 +626,10 @@ Pravidla pro file_writer:
 
 
 def check_reviewer_verdict(reviewer_output: str, current_task_name: str) -> tuple[bool, str]:
-    """Check if reviewer output contains PASS or FAIL for the correct task.
+    """Check if reviewer output contains PASS or FAIL verdict.
+    
+    Kontroluje POUZE první neprázdný řádek outputu — ignoruje PASS/FAIL
+    uvnitř textu review.
     
     Returns:
         (is_pass: bool, reason: str)
@@ -594,26 +637,30 @@ def check_reviewer_verdict(reviewer_output: str, current_task_name: str) -> tupl
     if not reviewer_output:
         return False, "Empty reviewer output"
     
-    reviewer_text_upper = reviewer_output.upper()
-    is_fail = "FAIL" in reviewer_text_upper
-    is_pass = "PASS" in reviewer_text_upper
+    for line in reviewer_output.strip().splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped.upper()
+            break
+    else:
+        return False, "Reviewer output is empty or whitespace only"
     
-    # Check if reviewer reviewed the correct task
     import re
     task_id_match = re.search(r"Task\s+(\d+\.\d+)", current_task_name)
     task_id = task_id_match.group(1) if task_id_match else None
     
-    if task_id and task_id not in reviewer_output:
-        return False, f"Reviewer reviewed wrong task (expected {current_task_name}, task_id {task_id} not found in output)"
+    is_pass = first_line.startswith("PASS")
+    is_fail = first_line.startswith("FAIL")
     
     if is_fail:
         return False, "Reviewer returned FAIL"
     
     if is_pass:
+        if task_id and task_id not in reviewer_output[:200]:
+            return False, f"Reviewer PASS but task ID '{task_id}' not found in first 200 chars"
         return True, "Reviewer returned PASS"
     
-    # Neither PASS nor FAIL found
-    return False, "Reviewer output does not contain PASS or FAIL"
+    return False, f"Reviewer output does not start with PASS or FAIL. First line: '{first_line[:80]}'"
 
 
 # ---------------------------------------------------------------------------
@@ -743,18 +790,18 @@ def _main_body():
             
             # Pass previous reviewer feedback to coder on retry
             coder_task = create_coder_task(coder, project_path, output_dir, current_task_name, architect_task, previous_reviewer_feedback)
-            reviewer_task = create_reviewer_task(reviewer, project_path, output_dir, current_task_name, coder_task)
             
-            crew_code_review = Crew(
-                agents=[coder, reviewer],
-                tasks=[coder_task, reviewer_task],
+            # 2a: Kodér pracuje samostatně
+            crew_coder = Crew(
+                agents=[coder],
+                tasks=[coder_task],
                 verbose=True,
                 process=Process.sequential,
                 step_callback=_step_callback,
             )
             
             try:
-                crew_code_review.kickoff()
+                crew_coder.kickoff()
             except Exception as e:
                 error_str = str(e)
                 is_transient = (
@@ -772,7 +819,44 @@ def _main_body():
                     time.sleep(wait)
                     continue
                 else:
-                    error_message = f"❌ Fatální chyba: {error_str[:500]}"
+                    error_message = f"❌ Fatální chyba (Kodér): {error_str[:500]}"
+                    print(error_message)
+                    send_telegram_message(error_message)
+                    sys.exit(1)
+            
+            save_usage(agents_map)
+            
+            # 2b: Reviewer pracuje samostatně — čte soubory z disku, ne z context
+            reviewer_task = create_reviewer_task(reviewer, project_path, output_dir, current_task_name)
+            
+            crew_reviewer = Crew(
+                agents=[reviewer],
+                tasks=[reviewer_task],
+                verbose=True,
+                process=Process.sequential,
+                step_callback=_step_callback,
+            )
+            
+            try:
+                crew_reviewer.kickoff()
+            except Exception as e:
+                error_str = str(e)
+                is_transient = (
+                    "429" in error_str or "rate_limit" in error_str
+                    or "timeout" in error_str.lower()
+                    or "connection" in error_str.lower()
+                    or "503" in error_str or "502" in error_str
+                    or "UNAVAILABLE" in error_str
+                    or "None or empty" in error_str
+                )
+                
+                if is_transient and attempt < max_attempts:
+                    wait = min(10 * attempt, 60)
+                    print(f"▶ Přechodná chyba, čekám {wait}s...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    error_message = f"❌ Fatální chyba (Reviewer): {error_str[:500]}"
                     print(error_message)
                     send_telegram_message(error_message)
                     sys.exit(1)
@@ -794,8 +878,19 @@ def _main_body():
                 print(f"\n⚠️  Reviewer: FAIL - {reason}")
                 print(f"   Pokus {attempt}/{max_attempts}")
                 
-                # Store reviewer feedback for next retry
-                previous_reviewer_feedback = reviewer_output
+                # Store reviewer feedback for next retry (extracted and condensed)
+                previous_reviewer_feedback = extract_fail_issues(reviewer_output, max_chars=1500)
+                
+                # Na 3+ pokusu přidej eskalační instrukci
+                if attempt >= 3:
+                    previous_reviewer_feedback = (
+                        f"⚠️ POKUS {attempt}/{max_attempts} — předchozí pokusy selhaly na STEJNÉM problému.\n"
+                        f"NEOPAKUJ stejný přístup. Použij ZÁSADNĚ JINÝ způsob řešení.\n"
+                        f"Pokud je soubor příliš velký, rozděl ho na víc souborů.\n"
+                        f"Pokud chybí import, přidej ho. Pokud je špatná logika, přepiš ji.\n\n"
+                        f"KONKRÉTNÍ PROBLÉMY K OPRAVĚ:\n"
+                        f"{extract_fail_issues(reviewer_output, max_chars=1000)}"
+                    )
                 
                 if attempt < max_attempts:
                     wait = 5

@@ -69,6 +69,13 @@ List of specific problems with solutions:
 
 IMPORTANT: The Supervisor automatically detects PASS/FAIL from your output.
 
+⚠️ KRITICKÉ PRAVIDLO:
+NIKDY nevydávej verdikt PASS nebo FAIL bez toho, abys:
+1. Použil list_dir na output adresář
+2. Přečetl KAŽDÝ relevantní soubor pomocí file_reader
+3. Použil directory_size_check pro kontrolu velikostí
+Pokud toto nedodržíš, Supervisor tvůj review odmítne.
+
 You are working on a project in: {project_path}
 Code output directory: {code_base}""",
         verbose=True,
