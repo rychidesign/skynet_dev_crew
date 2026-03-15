@@ -1,6 +1,6 @@
 # Bezpečné spuštění Supervisoru & Monitoru
 
-## 🚀 Supervisor (v3.0)
+## 🚀 Supervisor (v3.2)
 
 ### Nové 3-fázové workflow
 
@@ -21,6 +21,90 @@ FÁZE 3: INTEGRÁTOR (jen po PASS od Reviewera)
 - Architekt neběží při retry (úspora tokenů)
 - Integrátor neběží po FAIL (úspora tokenů)
 - Retry smyčka jen pro Kodér+Reviewer
+
+### 🆕 v3.1: Oddělené Crews
+
+Kodér a Reviewer běží v **oddělených Crews**:
+
+```
+┌─────────────────┐         ┌─────────────────┐
+│  CODER CREW     │         │  REVIEWER CREW  │
+│  (samostatný)   │────────▶│  (samostatný)   │
+│                 │         │  Čte z DISKU    │
+└─────────────────┘         └─────────────────┘
+```
+
+**Výhody:**
+- Reviewer čte soubory přímo z disku (ne z kontextu)
+- Menší token využití
+- Lepší izolace chyb
+
+### 🆕 v3.2: Task Guardrails
+
+Reviewer má nyní **guardrail validaci**:
+
+```python
+# Reviewer task s guardrail
+reviewer_task = Task(
+    ...,
+    guardrail=validate_reviewer_output,
+    guardrail_max_retries=2,  # Max 2 interní retry
+)
+```
+
+**Co guardrail kontroluje:**
+1. PASS/FAIL formát na prvním řádku
+2. Tool usage evidence (např. "Použil jsem directory_size_check")
+
+**Pokud guardrail selže:**
+- Reviewer dostane až 2 interní retry pokusy
+- Po vyčerpání retry → FAIL a pokračuje se v hlavní retry smyčce
+
+---
+
+## 🔄 Retry Behavior (v3.1 - v3.2)
+
+### FAIL Feedback Extraction
+
+Při FAIL od Reviewera se feedback **zkracuje** na 1.5k znaků:
+
+```python
+def extract_fail_issues(reviewer_output: str, max_chars: int = 1500) -> str:
+    """Extrahuje a zkracuje FAIL feedback pro Kodér."""
+    # Zachová nejdůležitější issues
+    # Zabrání nekonečné smyčce
+```
+
+**Proč?**
+- Dlouhý feedback → Kodér se zacyklí ve stejných chybách
+- Zkrácený feedback → Kodér se soustředí na klíčové issues
+
+### Escalation při 3+ Retry
+
+Při 3+ retry pokusech dostane Kodér **escalation instrukce**:
+
+```
+⚠️ ESCALATION: Toto je pokus č. 3+
+Zaměř se na:
+1. Přesně dodržuj specifikaci
+2. Kontroluj každý soubor před odesláním
+3. Pokud si nejsi jistý, zeptej se
+```
+
+### Fallback pro Empty Output
+
+Pokud Reviewer vrátí **prázdný výstup**:
+
+```python
+if not reviewer_output or reviewer_output.strip() == "":
+    logger.error("Reviewer returned empty output!")
+    send_telegram_message("⚠️ EMPTY REVIEWER OUTPUT")
+    continue  # Retry
+```
+
+**Notifikace:**
+- Log do souboru
+- Telegram zpráva pro monitoring
 
 ### Pravidlo: MAX 1 instance najednou
 
@@ -246,12 +330,53 @@ python3 supervisor.py taskmanager
 | `Invalid response from LLM` | Rate limit | Čekej 5 minut a zkus znovu |
 | Monitor se nespustí | Log file neexistuje | `mkdir -p logs && touch logs/taskmanager.log` |
 | Integrátor běží po FAIL | Stará verze supervisoru | Aktualizuj na v3.0+ |
+| 🆕 `Guardrail failed` | Reviewer nevalidní výstup | Automaticky retry (max 2) |
+| 🆕 `Empty reviewer output` | Reviewer neodpověděl | Log + Telegram notifikace, retry |
+| 🆕 `Escalation mode` | 3+ retry pokusy | Normální chování, Kodér dostane speciální instrukce |
+| 🆕 `Feedback truncated` | FAIL feedback > 1.5k znaků | Normální chování, zkráceno pro efektivitu |
 
 ---
 
-## 🆕 Nové funkce v3.0
+## 🆕 Nové funkce v3.0 - v3.2
 
-### File Size Limits
+### v3.2: Guardrails & Orchestration
+
+```python
+# Task Guardrail pro Reviewer
+reviewer_task = Task(
+    guardrail=validate_reviewer_output,
+    guardrail_max_retries=2,
+)
+
+# Extrahované orchestrace funkce
+run_architect_phase()      # FÁZE 1
+run_code_review_phase()    # FÁZE 2 (s retry loop)
+run_integrator_phase()     # FÁZE 3
+
+# Fallback pro empty output
+if not reviewer_output:
+    logger.error("Empty output")
+    send_telegram_message("⚠️ EMPTY REVIEWER OUTPUT")
+```
+
+### v3.1: Crew Separation & Feedback
+
+```python
+# Oddělené Crews
+coder_crew = Crew(agents=[coder], tasks=[coder_task])
+reviewer_crew = Crew(agents=[reviewer], tasks=[reviewer_task])
+
+# Reviewer čte z disku (ne z kontextu)
+# FAIL feedback zkrácen na 1.5k znaků
+feedback = extract_fail_issues(reviewer_output, max_chars=1500)
+
+# Robustní verdict check (jen první řádek)
+first_line = output.strip().split('\n')[0]
+if "PASS" in first_line.upper():
+    return True
+```
+
+### v3.0: File Size Limits
 
 Kodér a Reviewer nyní kontrolují délku souborů:
 
@@ -264,7 +389,7 @@ Kodér a Reviewer nyní kontrolují délku souborů:
 # - directory_size_check: kontrola všech souborů v adresáři
 ```
 
-### 3-Phase Workflow
+### v3.0: 3-Phase Workflow
 
 ```python
 # FÁZE 1: Architekt (jednou)
@@ -278,4 +403,6 @@ Kodér a Reviewer nyní kontrolují délku souborů:
 # Retry smyčka jen pro Kodér+Reviewer
 # Architekt neběží při retry
 # Integrátor neběží po FAIL
+# v3.1: FAIL feedback zkrácen na 1.5k znaků
+# v3.2: Guardrail max 2 interní retry pro Reviewer
 ```
